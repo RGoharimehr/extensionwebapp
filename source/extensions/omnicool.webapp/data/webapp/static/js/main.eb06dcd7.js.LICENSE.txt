@@ -1,0 +1,73 @@
+/*! @gamestream/utils */
+
+/*! @opentelemetry/api */
+
+/*! sdp */
+
+/*! sheetjs (C) 2013-present SheetJS -- http://sheetjs.com */
+
+/*! xlsx.js (C) 2013-present SheetJS -- http://sheetjs.com */
+
+/*!*******************************!*\
+              !*** ./index.js + 16 modules ***!
+              \*******************************/
+
+/*!*********************************!*\
+                  !*** ./node_modules/sdp/sdp.js ***!
+                  \*********************************/
+
+/*!************************************!*\
+                  !*** external "@gamestream/utils" ***!
+                  \************************************/
+
+/*!*************************************!*\
+                  !*** external "@opentelemetry/api" ***!
+                  \*************************************/
+
+/*!********************************************!*\
+                  !*** ../../ragnarok-core/dist/ragnarok.js ***!
+                  \********************************************/
+
+/*!******************************************************************!*\
+                  !*** ./node_modules/rtcpeerconnection-shim/rtcpeerconnection.js ***!
+                  \******************************************************************/
+
+/**
+ * @license React
+ * react-dom.production.min.js
+ *
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
+
+/**
+ * @license React
+ * react-jsx-runtime.production.min.js
+ *
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
+
+/**
+ * @license React
+ * react.production.min.js
+ *
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
+
+/**
+ * @license React
+ * scheduler.production.min.js
+ *
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
