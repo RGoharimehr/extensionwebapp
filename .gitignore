@@ -37,7 +37,7 @@ deps/**/user.toml
 # Streaming EventTrace
 *.etli
 
-/source
+/source/*
 !/source/extensions/
 !/source/extensions/omnicool.webapp/
 !/source/extensions/omnicool.webapp/**
