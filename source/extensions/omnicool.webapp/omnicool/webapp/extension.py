@@ -10,7 +10,7 @@ import omni.kit.app
 import carb
 import omni.kit.viewport.utility as vp_utils
 import omni.usd
-from pxr import UsdGeom
+from pxr import UsdGeom, Sdf, Gf
 
 
 # -----------------------------
@@ -69,6 +69,48 @@ def _get_attr(stage, prim_path: str, attr_name: str):
     return val
 
 
+_USD_VEC_TYPES = {
+    "float2": Gf.Vec2f, "float3": Gf.Vec3f, "float4": Gf.Vec4f,
+    "double2": Gf.Vec2d, "double3": Gf.Vec3d, "double4": Gf.Vec4d,
+    "half2": Gf.Vec2h, "half3": Gf.Vec3h, "half4": Gf.Vec4h,
+    "int2": Gf.Vec2i, "int3": Gf.Vec3i, "int4": Gf.Vec4i,
+    "color3f": Gf.Vec3f, "color4f": Gf.Vec4f,
+    "color3d": Gf.Vec3d, "color4d": Gf.Vec4d,
+    "normal3f": Gf.Vec3f, "normal3d": Gf.Vec3d,
+    "point3f": Gf.Vec3f, "point3d": Gf.Vec3d,
+    "vector3f": Gf.Vec3f, "vector3d": Gf.Vec3d,
+    "texCoord2f": Gf.Vec2f, "texCoord3f": Gf.Vec3f,
+    "matrix2d": Gf.Matrix2d, "matrix3d": Gf.Matrix3d, "matrix4d": Gf.Matrix4d,
+    "quatf": Gf.Quatf, "quatd": Gf.Quatd,
+}
+
+
+def _coerce_value_for_attr(attr, value):
+    """Convert a JSON-decoded value to the correct Python/USD type for the attribute."""
+    if value is None:
+        return value
+    try:
+        type_name = attr.GetTypeName()
+        if not type_name:
+            return value
+        type_str = str(type_name)
+        if type_str in ("float", "double", "half"):
+            return float(value)
+        if type_str in ("int", "int64", "uint", "uint64", "uchar"):
+            return int(value)
+        if type_str == "bool":
+            return bool(value)
+        if type_str in ("string", "token", "asset"):
+            return str(value)
+        if isinstance(value, (list, tuple)):
+            gf_type = _USD_VEC_TYPES.get(type_str)
+            if gf_type:
+                return gf_type(*value)
+    except Exception:
+        pass
+    return value
+
+
 def _set_attr(stage, prim_path: str, attr_name: str, value):
     prim = stage.GetPrimAtPath(prim_path)
     if not prim.IsValid():
@@ -76,12 +118,39 @@ def _set_attr(stage, prim_path: str, attr_name: str, value):
     attr = prim.GetAttribute(attr_name)
     if not attr:
         raise RuntimeError(f"Attribute not found: {attr_name}")
-
-    # Best-effort type handling:
-    # USD will coerce some basic python types automatically.
-    ok = attr.Set(value)
+    coerced = _coerce_value_for_attr(attr, value)
+    ok = attr.Set(coerced)
     if not ok:
         raise RuntimeError("USD attr.Set returned False")
+    return True
+
+
+def _create_attr(stage, prim_path: str, attr_name: str, type_name_str: str, value=None):
+    """Create a new attribute on a prim with the given SdfValueTypeName string."""
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim.IsValid():
+        raise RuntimeError(f"Prim not found: {prim_path}")
+    sdf_type = Sdf.ValueTypeNames.Find(type_name_str)
+    if not sdf_type:
+        raise RuntimeError(f"Unknown USD type name: {type_name_str}")
+    attr = prim.CreateAttribute(attr_name, sdf_type)
+    if not attr:
+        raise RuntimeError(f"Failed to create attribute: {attr_name}")
+    if value is not None:
+        coerced = _coerce_value_for_attr(attr, value)
+        attr.Set(coerced)
+    return True
+
+
+def _delete_attr(stage, prim_path: str, attr_name: str):
+    """Remove an attribute from a prim."""
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim.IsValid():
+        raise RuntimeError(f"Prim not found: {prim_path}")
+    attr = prim.GetAttribute(attr_name)
+    if not attr:
+        raise RuntimeError(f"Attribute not found: {attr_name}")
+    prim.RemoveProperty(attr_name)
     return True
 
 
@@ -361,11 +430,6 @@ class OmnicoolWebAppExt(omni.ext.IExt):
             if typ == "usd.ping":
                 return {"id": req_id, "ok": True, "payload": {"pong": True}}
 
-            # ✅ NEW: Omniverse-native selection query
-            if typ == "usd.get_selection":
-                paths = _get_selection_paths()
-                return {"id": req_id, "ok": True, "payload": {"paths": paths}}
-
             # ✅ NEW: list available attribute names
             if typ == "usd.list_attrs":
                 prim_path = payload.get("primPath", "")
@@ -393,6 +457,20 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                 value = payload.get("value", None)
                 _set_attr(stage, prim_path, attr, value)
                 return {"id": req_id, "ok": True, "payload": {"set": True}}
+
+            if typ == "usd.create_attr":
+                prim_path = payload.get("primPath", "")
+                attr = payload.get("attr", "")
+                type_name_str = payload.get("typeName", "float")
+                value = payload.get("value", None)
+                _create_attr(stage, prim_path, attr, type_name_str, value)
+                return {"id": req_id, "ok": True, "payload": {"created": True}}
+
+            if typ == "usd.delete_attr":
+                prim_path = payload.get("primPath", "")
+                attr = payload.get("attr", "")
+                _delete_attr(stage, prim_path, attr)
+                return {"id": req_id, "ok": True, "payload": {"deleted": True}}
 
             if typ == "usd.get_xform":
                 prim_path = payload.get("primPath", "")

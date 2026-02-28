@@ -1,1 +1,374 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><meta name="theme-color" content="#000000"/><meta name="description" content="WebRTC React Application"/><title>WebRTC React App</title><script defer="defer" src="/static/js/main.eb06dcd7.js"></script><link href="/static/css/main.12efbfe1.css" rel="stylesheet"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div></body></html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>USD Attribute Editor</title>
+  <style>
+    :root {
+      --bg: #1a1a2e; --surface: #16213e; --card: #0f3460;
+      --accent: #e94560; --accent2: #533483;
+      --text: #eee; --text-dim: #aaa; --border: #2a2a4a;
+      --success: #4caf50; --warning: #ff9800; --error: #f44336;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+    header { background: var(--surface); padding: 10px 18px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+    header h1 { font-size: 16px; font-weight: 600; white-space: nowrap; }
+    .status-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--error); flex-shrink: 0; }
+    .status-dot.connected { background: var(--success); }
+    .status-dot.connecting { background: var(--warning); }
+    .status-label { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+    .ws-row { display: flex; gap: 6px; margin-left: auto; align-items: center; }
+    .ws-row input { background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 5px 9px; border-radius: 4px; font-size: 12px; width: 200px; }
+    button { cursor: pointer; border: none; border-radius: 4px; padding: 5px 12px; font-size: 12px; font-weight: 500; transition: opacity .15s; }
+    button:disabled { opacity: .4; cursor: default; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:not(:disabled):hover { opacity: .82; }
+    .btn-secondary { background: var(--card); color: var(--text); border: 1px solid var(--border); }
+    .btn-secondary:not(:disabled):hover { background: var(--accent2); border-color: var(--accent2); }
+    .btn-danger { background: transparent; color: var(--error); border: 1px solid var(--error); }
+    .btn-danger:not(:disabled):hover { background: var(--error); color: #fff; }
+    .btn-sm { padding: 3px 8px; font-size: 11px; }
+    .sel-bar { background: var(--accent2); padding: 5px 16px; font-size: 12px; display: none; align-items: center; gap: 8px; flex-shrink: 0; }
+    .sel-bar.show { display: flex; }
+    main { flex: 1; display: flex; overflow: hidden; }
+    /* ── Prim panel ── */
+    .prim-panel { width: 260px; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; }
+    .panel-hdr { padding: 9px 12px; font-size: 12px; font-weight: 600; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+    .path-row { padding: 8px 10px; display: flex; gap: 5px; border-bottom: 1px solid var(--border); }
+    .path-row input { flex: 1; background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 4px 7px; border-radius: 3px; font-size: 12px; font-family: monospace; }
+    .prim-list { flex: 1; overflow-y: auto; }
+    .prim-item { padding: 6px 12px; font-size: 12px; cursor: pointer; border-bottom: 1px solid rgba(255,255,255,.04); display: flex; align-items: center; gap: 6px; font-family: monospace; }
+    .prim-item:hover { background: var(--card); }
+    .prim-item.sel { background: var(--accent2); }
+    .prim-icon { opacity: .5; font-style: normal; }
+    /* ── Attr panel ── */
+    .attr-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+    .attr-toolbar { padding: 8px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; background: var(--surface); flex-shrink: 0; flex-wrap: wrap; }
+    .attr-toolbar .prim-lbl { font-size: 13px; color: var(--accent); font-family: monospace; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .table-wrap { flex: 1; overflow-y: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th { text-align: left; padding: 7px 11px; background: var(--surface); border-bottom: 2px solid var(--border); font-weight: 600; color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; position: sticky; top: 0; }
+    td { padding: 5px 11px; border-bottom: 1px solid rgba(255,255,255,.05); vertical-align: middle; }
+    tr:hover td { background: rgba(255,255,255,.03); }
+    .col-name { font-family: monospace; color: #64b5f6; white-space: nowrap; }
+    .col-type { color: var(--text-dim); font-family: monospace; font-size: 11px; white-space: nowrap; }
+    .col-val  { font-family: monospace; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .col-acts { white-space: nowrap; }
+    .edit-inp { background: var(--card); border: 1px solid var(--accent); color: var(--text); padding: 3px 7px; border-radius: 3px; font-family: monospace; font-size: 12px; width: 100%; }
+    .act-row { display: flex; gap: 3px; }
+    /* ── Create form ── */
+    .create-form { padding: 12px 14px; background: var(--surface); border-top: 1px solid var(--border); flex-shrink: 0; }
+    .create-form h3 { font-size: 12px; font-weight: 600; color: var(--text-dim); margin-bottom: 8px; }
+    .form-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+    .form-row input, .form-row select { background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 5px 8px; border-radius: 4px; font-size: 12px; }
+    #newName { width: 140px; font-family: monospace; }
+    #newType { width: 120px; }
+    #newVal  { flex: 1; min-width: 100px; font-family: monospace; }
+    /* ── Toast ── */
+    #toast { position: fixed; bottom: 18px; right: 18px; background: var(--card); color: var(--text); padding: 9px 16px; border-radius: 5px; font-size: 12px; display: none; border-left: 3px solid var(--success); z-index: 999; max-width: 320px; }
+    #toast.err { border-left-color: var(--error); }
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🔷 USD Attribute Editor</h1>
+  <div class="status-dot" id="dot"></div>
+  <span class="status-label" id="statusLbl">Disconnected</span>
+  <div class="ws-row">
+    <input id="wsUrl" value="ws://127.0.0.1:8899" placeholder="ws://host:port"/>
+    <button class="btn-primary" id="connectBtn" onclick="toggleConnect()">Connect</button>
+  </div>
+</header>
+
+<div class="sel-bar" id="selBar">
+  📌 Viewport selection:&nbsp;<span id="selPaths" style="font-family:monospace"></span>
+  <button class="btn-sm btn-secondary" onclick="loadFromSel()">Load</button>
+</div>
+
+<main>
+  <div class="prim-panel">
+    <div class="panel-hdr">
+      Stage Browser
+      <button class="btn-sm btn-secondary" onclick="refreshChildren()" title="Refresh children">↻</button>
+    </div>
+    <div class="path-row">
+      <input id="pathInp" value="/World" placeholder="Prim path" onkeydown="if(event.key==='Enter')goPath()"/>
+      <button class="btn-sm btn-primary" onclick="goPath()">Go</button>
+    </div>
+    <div class="prim-list" id="primList"><div style="padding:12px;color:var(--text-dim);font-size:12px">Connect to browse…</div></div>
+  </div>
+
+  <div class="attr-panel">
+    <div class="attr-toolbar">
+      <span class="prim-lbl" id="primLbl">— no prim selected —</span>
+      <button class="btn-sm btn-secondary" onclick="refreshAttrs()">↻ Refresh</button>
+      <button class="btn-sm btn-secondary" onclick="syncSel()">📌 Sync Selection</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Attribute</th><th>Type</th><th>Value</th><th>Actions</th></tr></thead>
+        <tbody id="attrTbody">
+          <tr><td colspan="4" style="text-align:center;padding:24px;color:var(--text-dim)">Select a prim to view its attributes</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="create-form">
+      <h3>+ Create New Attribute</h3>
+      <div class="form-row">
+        <input id="newName" placeholder="attributeName" />
+        <select id="newType">
+          <option value="float">float</option>
+          <option value="double">double</option>
+          <option value="int">int</option>
+          <option value="bool">bool</option>
+          <option value="string">string</option>
+          <option value="token">token</option>
+          <option value="asset">asset</option>
+          <option value="float2">float2</option>
+          <option value="float3">float3</option>
+          <option value="float4">float4</option>
+          <option value="double3">double3</option>
+          <option value="color3f">color3f</option>
+          <option value="color4f">color4f</option>
+          <option value="normal3f">normal3f</option>
+          <option value="point3f">point3f</option>
+          <option value="vector3f">vector3f</option>
+          <option value="texCoord2f">texCoord2f</option>
+          <option value="matrix4d">matrix4d</option>
+          <option value="quatf">quatf</option>
+        </select>
+        <input id="newVal" placeholder="initial value (JSON, optional)" />
+        <button class="btn-primary" onclick="createAttr()">Create</button>
+      </div>
+    </div>
+  </div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+  /* ── State ─────────────────────────────────────────────────── */
+  let ws = null, msgId = 0, pending = {}, currentPrim = null, editingAttr = null, attrRows = [];
+
+  /* ── WebSocket ─────────────────────────────────────────────── */
+  function toggleConnect() {
+    if (ws && ws.readyState === WebSocket.OPEN) { ws.close(); return; }
+    connect();
+  }
+
+  function connect() {
+    const url = document.getElementById('wsUrl').value.trim();
+    if (ws) { ws.close(); ws = null; }
+    setStatus('connecting');
+    ws = new WebSocket(url);
+    ws.onopen = () => {
+      setStatus('connected');
+      document.getElementById('connectBtn').textContent = 'Disconnect';
+      syncSel();
+      if (currentPrim) refreshAttrs();
+      else refreshChildren();
+    };
+    ws.onclose = ws.onerror = () => {
+      setStatus('disconnected');
+      document.getElementById('connectBtn').textContent = 'Connect';
+    };
+    ws.onmessage = (evt) => {
+      let msg; try { msg = JSON.parse(evt.data); } catch { return; }
+      const cb = pending[msg.id];
+      if (cb) { delete pending[msg.id]; msg.ok ? cb.resolve(msg.payload) : cb.reject(new Error(msg.error || 'USD error')); }
+    };
+  }
+
+  function send(type, payload) {
+    return new Promise((resolve, reject) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) { reject(new Error('Not connected')); return; }
+      const id = String(++msgId);
+      pending[id] = { resolve, reject };
+      ws.send(JSON.stringify({ id, type, payload }));
+      setTimeout(() => { if (pending[id]) { delete pending[id]; reject(new Error('Timeout')); } }, 10000);
+    });
+  }
+
+  function setStatus(s) {
+    const dot = document.getElementById('dot'), lbl = document.getElementById('statusLbl');
+    dot.className = 'status-dot' + (s === 'connected' ? ' connected' : s === 'connecting' ? ' connecting' : '');
+    lbl.textContent = s === 'connected' ? 'Connected' : s === 'connecting' ? 'Connecting…' : 'Disconnected';
+  }
+
+  function toast(msg, isErr) {
+    const t = document.getElementById('toast');
+    t.textContent = msg; t.className = isErr ? 'err' : ''; t.style.display = 'block';
+    setTimeout(() => { t.style.display = 'none'; }, 3000);
+  }
+
+  /* ── Prim browser ──────────────────────────────────────────── */
+  async function goPath() {
+    const p = document.getElementById('pathInp').value.trim();
+    if (p) await selectPrim(p);
+  }
+
+  async function refreshChildren() {
+    const path = document.getElementById('pathInp').value.trim() || '/';
+    try {
+      const r = await send('usd.list_children', { primPath: path });
+      renderPrimList(r.children || []);
+    } catch(e) { toast('Error: ' + e.message, true); }
+  }
+
+  async function selectPrim(path) {
+    currentPrim = path;
+    document.getElementById('pathInp').value = path;
+    document.getElementById('primLbl').textContent = path;
+    document.querySelectorAll('.prim-item').forEach(el => el.classList.toggle('sel', el.dataset.path === path));
+    await Promise.all([refreshAttrs(), refreshChildren()]);
+  }
+
+  function renderPrimList(paths) {
+    const list = document.getElementById('primList');
+    if (!paths.length) { list.innerHTML = '<div style="padding:12px;color:var(--text-dim);font-size:12px">No children</div>'; return; }
+    list.innerHTML = '';
+    paths.forEach(p => {
+      const el = document.createElement('div');
+      el.className = 'prim-item' + (p === currentPrim ? ' sel' : '');
+      el.dataset.path = p;
+      el.innerHTML = `<i class="prim-icon">▸</i>${esc(p.split('/').pop())}`;
+      el.title = p;
+      el.onclick = () => selectPrim(p);
+      list.appendChild(el);
+    });
+  }
+
+  /* ── Attribute editor ──────────────────────────────────────── */
+  async function refreshAttrs() {
+    if (!currentPrim) return;
+    const tbody = document.getElementById('attrTbody');
+    tbody.innerHTML = '<tr><td colspan="4" style="padding:12px;color:var(--text-dim)">Loading…</td></tr>';
+    try {
+      const { attrs } = await send('usd.list_attrs', { primPath: currentPrim });
+      attrRows = await Promise.all((attrs || []).map(async name => {
+        try { const r = await send('usd.get_attr', { primPath: currentPrim, attr: name }); return { name, value: r.value }; }
+        catch { return { name, value: null }; }
+      }));
+      renderAttrTable();
+    } catch(e) {
+      tbody.innerHTML = `<tr><td colspan="4" style="padding:12px;color:var(--error)">${esc(e.message)}</td></tr>`;
+    }
+  }
+
+  function renderAttrTable() {
+    const tbody = document.getElementById('attrTbody');
+    tbody.innerHTML = '';
+    if (!attrRows.length) {
+      tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:24px;color:var(--text-dim)">No attributes on this prim</td></tr>';
+      return;
+    }
+    attrRows.forEach(({ name, value }) => {
+      const tr = document.createElement('tr');
+      const vs = fmtVal(value), editing = editingAttr === name;
+      tr.innerHTML = `
+        <td class="col-name">${esc(name)}</td>
+        <td class="col-type">${esc(guessType(value))}</td>
+        <td class="col-val">${
+          editing
+            ? `<input class="edit-inp" id="ei_${esc(name)}" value="${esc(vs)}" onkeydown="onEditKey(event,'${esc(name)}')">`
+            : `<span title="${esc(vs)}">${esc(vs)}</span>`
+        }</td>
+        <td class="col-acts"><div class="act-row">${
+          editing
+            ? `<button class="btn-sm btn-primary" onclick="saveAttr('${esc(name)}')">✓ Save</button>
+               <button class="btn-sm btn-secondary" onclick="cancelEdit()">✗</button>`
+            : `<button class="btn-sm btn-secondary" onclick="startEdit('${esc(name)}')">Edit</button>
+               <button class="btn-sm btn-danger" onclick="deleteAttr('${esc(name)}')">✕</button>`
+        }</div></td>`;
+      tbody.appendChild(tr);
+    });
+    if (editingAttr) { const inp = document.getElementById('ei_' + editingAttr); if (inp) { inp.focus(); inp.select(); } }
+  }
+
+  function startEdit(name) { editingAttr = name; renderAttrTable(); }
+  function cancelEdit()    { editingAttr = null; renderAttrTable(); }
+  function onEditKey(e, name) { if (e.key === 'Enter') saveAttr(name); else if (e.key === 'Escape') cancelEdit(); }
+
+  async function saveAttr(name) {
+    const inp = document.getElementById('ei_' + name);
+    if (!inp) return;
+    let value; try { value = JSON.parse(inp.value); } catch { value = inp.value; }
+    try {
+      await send('usd.set_attr', { primPath: currentPrim, attr: name, value });
+      toast('✓ Saved: ' + name);
+      editingAttr = null;
+      await refreshAttrs();
+    } catch(e) { toast('Error: ' + e.message, true); }
+  }
+
+  async function deleteAttr(name) {
+    if (!confirm(`Delete attribute "${name}" from ${currentPrim}?`)) return;
+    try {
+      await send('usd.delete_attr', { primPath: currentPrim, attr: name });
+      toast('✓ Deleted: ' + name);
+      await refreshAttrs();
+    } catch(e) { toast('Error: ' + e.message, true); }
+  }
+
+  async function createAttr() {
+    const name = document.getElementById('newName').value.trim();
+    const typeName = document.getElementById('newType').value;
+    const rawVal  = document.getElementById('newVal').value.trim();
+    if (!name) { toast('Enter attribute name', true); return; }
+    if (!currentPrim) { toast('Select a prim first', true); return; }
+    let value = null;
+    if (rawVal) { try { value = JSON.parse(rawVal); } catch { value = rawVal; } }
+    try {
+      await send('usd.create_attr', { primPath: currentPrim, attr: name, typeName, value });
+      toast('✓ Created: ' + name);
+      document.getElementById('newName').value = '';
+      document.getElementById('newVal').value  = '';
+      await refreshAttrs();
+    } catch(e) { toast('Error: ' + e.message, true); }
+  }
+
+  /* ── Viewport selection ────────────────────────────────────── */
+  async function syncSel() {
+    try {
+      const { paths } = await send('usd.get_selection', {});
+      const bar = document.getElementById('selBar');
+      if (paths && paths.length) {
+        bar.className = 'sel-bar show';
+        document.getElementById('selPaths').textContent = paths.join(', ');
+      } else { bar.className = 'sel-bar'; }
+    } catch { /* ignore */ }
+  }
+
+  async function loadFromSel() {
+    try {
+      const { paths } = await send('usd.get_selection', {});
+      if (paths && paths.length) await selectPrim(paths[0]);
+      else toast('Nothing selected in viewport', true);
+    } catch(e) { toast('Error: ' + e.message, true); }
+  }
+
+  /* ── Helpers ───────────────────────────────────────────────── */
+  function fmtVal(v) {
+    if (v === null || v === undefined) return '—';
+    if (typeof v === 'object') return JSON.stringify(v);
+    return String(v);
+  }
+  function guessType(v) {
+    if (v === null || v === undefined) return '';
+    if (Array.isArray(v)) return `array[${v.length}]`;
+    return typeof v;
+  }
+  function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  /* Auto-connect */
+  window.onload = connect;
+</script>
+</body>
+</html>
