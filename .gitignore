@@ -3,6 +3,7 @@ _*/
 
 # Compiled python files.
 *.py[cod]
+__pycache__/
 
 # Visual Studio files.
 /.vs
