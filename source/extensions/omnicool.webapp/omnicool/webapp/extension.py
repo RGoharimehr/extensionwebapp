@@ -12,6 +12,8 @@ import omni.kit.viewport.utility as vp_utils
 import omni.usd
 from pxr import UsdGeom, Sdf, Gf
 
+from omnicool.webapp import flownex_metadata as _fx
+
 
 # -----------------------------
 # Static HTTP server (Method A)
@@ -476,6 +478,138 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                 prim_path = payload.get("primPath", "")
                 mat = _get_xform(stage, prim_path)
                 return {"id": req_id, "ok": True, "payload": {"matrix4x4": mat}}
+
+            # -----------------------------------------------------------------
+            # Flownex controller metadata  (flownex.*)
+            # All handlers resolve the prim from payload["primPath"].
+            # -----------------------------------------------------------------
+            if typ.startswith("flownex."):
+                prim_path = payload.get("primPath", "")
+                prim = stage.GetPrimAtPath(prim_path)
+                if not prim.IsValid():
+                    return {"id": req_id, "ok": False, "error": f"Prim not found: {prim_path}"}
+
+                if typ == "flownex.ensure_metadata":
+                    meta = _fx.ensure_controller_metadata(prim)
+                    return {"id": req_id, "ok": True, "payload": {"meta": meta}}
+
+                if typ == "flownex.get_metadata":
+                    meta = _fx.get_controller_metadata(prim)
+                    return {"id": req_id, "ok": True, "payload": {"meta": meta}}
+
+                if typ == "flownex.patch_metadata":
+                    patch = payload.get("patch", {})
+                    meta = _fx.patch_controller_metadata(prim, patch)
+                    return {"id": req_id, "ok": True, "payload": {"meta": meta}}
+
+                if typ == "flownex.set_runtime_state":
+                    meta = _fx.set_runtime_state(
+                        prim,
+                        state=payload.get("state", "idle"),
+                        lastAction=payload.get("lastAction"),
+                        ok=payload.get("ok"),
+                        message=payload.get("message"),
+                    )
+                    return {"id": req_id, "ok": True, "payload": {"meta": meta}}
+
+                if typ == "flownex.set_intent_mode":
+                    meta = _fx.set_intent_mode(prim, payload.get("mode", "steady"))
+                    return {"id": req_id, "ok": True, "payload": {"meta": meta}}
+
+                if typ == "flownex.set_steady_timeout":
+                    meta = _fx.set_steady_timeout_ms(prim, int(payload.get("timeoutMs", 120000)))
+                    return {"id": req_id, "ok": True, "payload": {"meta": meta}}
+
+                if typ == "flownex.request_transient":
+                    meta = _fx.request_transient(prim, payload.get("action", "none"))
+                    return {"id": req_id, "ok": True, "payload": {"meta": meta}}
+
+                if typ == "flownex.set_desired_property":
+                    meta = _fx.set_desired_property(
+                        prim,
+                        payload.get("componentIdentifier", ""),
+                        payload.get("propertyIdentifier", ""),
+                        str(payload.get("value", "")),
+                        unit=payload.get("unit"),
+                        value_type=payload.get("valueType", "string"),
+                    )
+                    return {"id": req_id, "ok": True, "payload": {"meta": meta}}
+
+                if typ == "flownex.remove_desired_property":
+                    meta = _fx.remove_desired_property(
+                        prim,
+                        payload.get("componentIdentifier", ""),
+                        payload.get("propertyIdentifier", ""),
+                    )
+                    return {"id": req_id, "ok": True, "payload": {"meta": meta}}
+
+                if typ == "flownex.get_desired_properties":
+                    props = _fx.get_desired_properties(prim)
+                    return {"id": req_id, "ok": True, "payload": {"desiredProperties": props}}
+
+                if typ == "flownex.set_observed_property":
+                    meta = _fx.set_observed_property(
+                        prim,
+                        payload.get("componentIdentifier", ""),
+                        payload.get("propertyIdentifier", ""),
+                        payload.get("value"),
+                    )
+                    return {"id": req_id, "ok": True, "payload": {"meta": meta}}
+
+                if typ == "flownex.get_observed_properties":
+                    props = _fx.get_observed_properties(prim)
+                    return {"id": req_id, "ok": True, "payload": {"observedProperties": props}}
+
+                if typ == "flownex.enqueue_command":
+                    cmd_id = _fx.enqueue_command(
+                        prim,
+                        payload.get("op", ""),
+                        args=payload.get("args"),
+                    )
+                    return {"id": req_id, "ok": True, "payload": {"cmdId": cmd_id}}
+
+                if typ == "flownex.list_commands":
+                    cmds = _fx.list_commands(prim, status=payload.get("status"))
+                    return {"id": req_id, "ok": True, "payload": {"commands": cmds}}
+
+                if typ == "flownex.mark_command_status":
+                    found = _fx.mark_command_status(
+                        prim,
+                        payload.get("cmdId", ""),
+                        status=payload.get("status", "applied"),
+                        error=payload.get("error"),
+                    )
+                    return {"id": req_id, "ok": True, "payload": {"found": found}}
+
+                if typ == "flownex.pop_next_pending_command":
+                    cmd = _fx.pop_next_pending_command(prim)
+                    return {"id": req_id, "ok": True, "payload": {"command": cmd}}
+
+                if typ == "flownex.get_parameters":
+                    params = _fx.get_parameters(prim)
+                    return {"id": req_id, "ok": True, "payload": {"parameters": params}}
+
+                if typ == "flownex.set_parameter_value":
+                    meta = _fx.set_parameter_value(
+                        prim,
+                        payload.get("key", ""),
+                        payload.get("value"),
+                    )
+                    return {"id": req_id, "ok": True, "payload": {"meta": meta}}
+
+                if typ == "flownex.get_parameter_value":
+                    val = _fx.get_parameter_value(prim, payload.get("key", ""))
+                    return {"id": req_id, "ok": True, "payload": {"value": val}}
+
+                if typ == "flownex.load_parameter_table_rows":
+                    meta = _fx.load_parameter_table_rows(prim, payload.get("rows", []))
+                    return {"id": req_id, "ok": True, "payload": {"meta": meta}}
+
+                if typ == "flownex.sync_parameters":
+                    meta = _fx.sync_parameters_to_desired_properties(prim)
+                    return {"id": req_id, "ok": True, "payload": {"meta": meta}}
+
+                return {"id": req_id, "ok": False, "error": f"Unknown flownex type: {typ}"}
 
             return {"id": req_id, "ok": False, "error": f"Unknown type: {typ}"}
 
