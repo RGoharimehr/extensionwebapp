@@ -13,6 +13,7 @@ import omni.usd
 from pxr import UsdGeom, Sdf, Gf
 
 from omnicool.webapp import flownex_metadata as _fx
+from omnicool.webapp.webrtc_server import WebRTCSignalingServer
 
 
 # -----------------------------
@@ -269,6 +270,10 @@ class OmnicoolWebAppExt(omni.ext.IExt):
         self._ws_server = None
         self._ws_task = None
 
+        # WebRTC signaling server state
+        self._webrtc_server: WebRTCSignalingServer | None = None
+        self._webrtc_task = None
+
         settings = carb.settings.get_settings()
         base = "/exts/omnicool.webapp"
         self._auto = bool(settings.get(f"{base}/autoLaunch") or True)
@@ -281,6 +286,10 @@ class OmnicoolWebAppExt(omni.ext.IExt):
         self._ws_host = str(settings.get(f"{base}/wsHost") or "127.0.0.1")
         self._ws_port = int(settings.get(f"{base}/wsPort") or 8899)
 
+        self._webrtc_enabled = bool(settings.get(f"{base}/webrtcEnabled") or False)
+        self._webrtc_host = str(settings.get(f"{base}/webrtcHost") or "127.0.0.1")
+        self._webrtc_port = int(settings.get(f"{base}/webrtcPort") or 8900)
+
         mgr = omni.kit.app.get_app().get_extension_manager()
         ext_path = mgr.get_extension_path(ext_id)
         self._web_root = os.path.join(ext_path, self._web_root_rel)
@@ -288,12 +297,17 @@ class OmnicoolWebAppExt(omni.ext.IExt):
         carb.log_info(f"[omnicool.webapp] web_root={self._web_root}")
         carb.log_info(f"[omnicool.webapp] http=http://{self._host}:{self._port}")
         carb.log_info(f"[omnicool.webapp] ws=ws://{self._ws_host}:{self._ws_port}")
+        carb.log_info(f"[omnicool.webapp] webrtc enabled={self._webrtc_enabled} "
+                      f"http://{self._webrtc_host}:{self._webrtc_port}")
 
         if self._auto:
             self._start_http()
             self._start_ws()
+            if self._webrtc_enabled:
+                self._start_webrtc()
 
     def on_shutdown(self):
+        self._stop_webrtc()
         self._stop_ws()
         self._stop_http()
 
@@ -393,6 +407,47 @@ class OmnicoolWebAppExt(omni.ext.IExt):
             except Exception:
                 pass
             self._ws_server = None
+
+    # -----------------
+    # WebRTC signaling (aiortc — pure Python, same process as Kit)
+    # -----------------
+    def _start_webrtc(self):
+        """Start the aiortc-based WebRTC signaling server in Kit's asyncio loop."""
+        if self._webrtc_task:
+            return
+
+        async def _run():
+            try:
+                self._webrtc_server = WebRTCSignalingServer(
+                    message_handler=self._handle_ws_message
+                )
+                await self._webrtc_server.start(
+                    host=self._webrtc_host, port=self._webrtc_port
+                )
+                carb.log_info(
+                    f"[omnicool.webapp][webrtc] signaling server started — "
+                    f"POST http://{self._webrtc_host}:{self._webrtc_port}/webrtc/offer"
+                )
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                carb.log_error(f"[omnicool.webapp][webrtc] server failed: {e}")
+            finally:
+                if self._webrtc_server:
+                    await self._webrtc_server.stop()
+                    self._webrtc_server = None
+
+        loop = asyncio.get_event_loop()
+        self._webrtc_task = loop.create_task(_run())
+
+    def _stop_webrtc(self):
+        if self._webrtc_task:
+            try:
+                self._webrtc_task.cancel()
+            except Exception:
+                pass
+            self._webrtc_task = None
 
     async def _handle_ws_message(self, msg: str):
         """
