@@ -5,6 +5,28 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Omnicool</title>
     <link href="/static/css/main.12efbfe1.css" rel="stylesheet">
+    <!-- ════════════════════════════════════════════════════════════════
+         OMNICOOL CONFIGURATION — edit this block to customise the app.
+         All settings have safe defaults if omitted.
+         ════════════════════════════════════════════════════════════════ -->
+    <script>
+    window.OMNICOOL_CONFIG = {
+      /* USD attribute that identifies a tracked component (prim-inspect HUD). */
+      trackedAttr: "flownex:componentName",
+
+      /* Fallback prim path used in standalone / demo mode (no Omniverse). */
+      stubPrimPath: "/World/DataCenter/Rack_A/Pump_01",
+
+      /* WebSocket endpoint of the Omniverse extension bridge.             */
+      wsUrl: "ws://127.0.0.1:8899",
+
+      /* How long the mouse must be held (ms) to trigger prim inspect.    */
+      holdMs: 1000,
+
+      /* Maximum number of USD attributes shown in the inspect HUD.       */
+      maxAttrs: 10
+    };
+    </script>
     <style>
       /* ── I-key inspect mode ─────────────────────────────────────── */
       body.omni-i-mode, body.omni-i-mode * { cursor: crosshair !important; }
@@ -57,9 +79,10 @@
     (function () {
       'use strict';
 
-      var WS_URL   = 'ws://127.0.0.1:8899';
-      var HOLD_MS  = 1000;
-      var MAX_ATTRS = 10;
+      var _cfg      = window.OMNICOOL_CONFIG || {};
+      var WS_URL    = _cfg.wsUrl    || 'ws://127.0.0.1:8899';
+      var HOLD_MS   = _cfg.holdMs   || 1000;
+      var MAX_ATTRS = _cfg.maxAttrs || 10;
 
       var _ws        = null;
       var _msgId     = 0;
