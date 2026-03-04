@@ -36,6 +36,15 @@ exts."omnicool.webapp".webRoot = "data/webapp"
 exts."omnicool.webapp".wsHost = "127.0.0.1"
 exts."omnicool.webapp".wsPort = 8899
 
+# WebRTC signaling server (aiortc — pure Python, no Node.js runtime)
+# Set webrtcEnabled = true to start the signaling endpoint on startup.
+# Browsers post their SDP offer to http://<webrtcHost>:<webrtcPort>/webrtc/offer
+# and receive an SDP answer; the resulting RTCDataChannel uses the same
+# JSON message protocol as the WebSocket USD bridge.
+exts."omnicool.webapp".webrtcEnabled = false
+exts."omnicool.webapp".webrtcHost = "127.0.0.1"
+exts."omnicool.webapp".webrtcPort = 8900
+
 
 [[python.module]]  # Main python module this extension provides, it will be publicly available as "import omnicool.webapp"
 name = "omnicool.webapp"
