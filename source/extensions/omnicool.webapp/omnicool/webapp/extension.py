@@ -3,6 +3,7 @@ import json
 import threading
 import webbrowser
 import asyncio
+import functools
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 
 import omni.ext
@@ -327,8 +328,8 @@ class OmnicoolWebAppExt(omni.ext.IExt):
             )
             return
 
-        os.chdir(self._web_root)
-        self._httpd = ThreadingHTTPServer((self._host, self._port), _StaticHandler)
+        handler = functools.partial(_StaticHandler, directory=self._web_root)
+        self._httpd = ThreadingHTTPServer((self._host, self._port), handler)
 
         def _serve():
             carb.log_info(f"[omnicool.webapp][http] Serving http://{self._host}:{self._port}")
