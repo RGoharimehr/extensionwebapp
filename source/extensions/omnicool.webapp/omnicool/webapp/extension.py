@@ -177,35 +177,48 @@ def _get_xform(stage, prim_path: str):
 def _pick_prim_path(norm_x: float, norm_y: float) -> str:
     """
     Pick a prim in the active viewport using normalized coordinates [0..1].
-    Returns prim path string or "" if nothing hit.
+
+    Tries hardware raycast picking via omni.kit.raycast.query when the viewport
+    is available.  Falls back to returning the first currently-selected prim so
+    the workflow "select a prim, then hold I + click to inspect it" always works
+    even when GPU picking is unavailable (e.g., headless or viewer mode).
+
+    Returns the prim path string or "" if nothing is found.
     """
     try:
         vp = vp_utils.get_active_viewport_window()
-        if vp is None:
-            return ""
-
-        # Viewport pixel size
-        w, h = vp.get_texture_resolution()
-        if not w or not h:
-            return ""
-
-        px = int(norm_x * w)
-        py = int(norm_y * h)
-
-        # picking expects window coords (origin differs by API version).
-        # We'll try common form: y from top -> convert to bottom origin.
-        py_flipped = int((1.0 - norm_y) * h)
-
-        # Try both ways to be robust across kit builds
-        hit = picking.pick_prim(px, py_flipped)
-        if not hit or not getattr(hit, "prim_path", None):
-            hit = picking.pick_prim(px, py)
-
-        prim_path = getattr(hit, "prim_path", "") or ""
-        return str(prim_path)
+        if vp is not None:
+            try:
+                w, h = vp.get_texture_resolution()
+            except Exception:
+                w, h = 0, 0
+            if w and h:
+                px = int(norm_x * w)
+                # y from top -> bottom-origin for Kit's picking API
+                py_flipped = int((1.0 - norm_y) * h)
+                import importlib
+                for api in ("omni.kit.raycast.query",):
+                    try:
+                        mod = importlib.import_module(api)
+                        pick_fn = getattr(mod, "pick_prim", None)
+                        if pick_fn is not None:
+                            hit = pick_fn(px, py_flipped)
+                            if hit and getattr(hit, "prim_path", None):
+                                return str(hit.prim_path)
+                            # Also try top-origin coords in case API differs
+                            hit = pick_fn(px, int(norm_y * h))
+                            if hit and getattr(hit, "prim_path", None):
+                                return str(hit.prim_path)
+                    except Exception:
+                        pass
     except Exception as e:
-        carb.log_warn(f"[omnicool.webapp][pick] failed: {e}")
-        return ""
+        carb.log_warn(f"[omnicool.webapp][pick] viewport pick failed: {e}")
+
+    # Reliable fallback: return the first currently selected prim.
+    # The documented user workflow is to select a prim first and then
+    # trigger the HUD gesture, so this covers the common case.
+    paths = _get_selection_paths()
+    return paths[0] if paths else ""
 
 def _json_safe(value):
     # Convert common USD / pxr types into JSON-serializable values
@@ -498,6 +511,12 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                 prim_path = payload.get("primPath", "")
                 return {"id": req_id, "ok": True, "payload": {"exists": _prim_exists(stage, prim_path)}}
 
+            if typ == "usd.pick":
+                norm_x = float(payload.get("x", 0.0))
+                norm_y = float(payload.get("y", 0.0))
+                prim_path = _pick_prim_path(norm_x, norm_y)
+                return {"id": req_id, "ok": True, "payload": {"primPath": prim_path or None}}
+
             if typ == "usd.list_children":
                 prim_path = payload.get("primPath", "/World")
                 children = _list_children(stage, prim_path)
@@ -506,8 +525,16 @@ class OmnicoolWebAppExt(omni.ext.IExt):
             if typ == "usd.get_attr":
                 prim_path = payload.get("primPath", "")
                 attr = payload.get("attr", "")
-                val = _get_attr(stage, prim_path, attr)
-                return {"id": req_id, "ok": True, "payload": {"value": _json_safe(val)}}
+                try:
+                    val = _get_attr(stage, prim_path, attr)
+                    return {"id": req_id, "ok": True, "payload": {"value": _json_safe(val)}}
+                except RuntimeError as exc:
+                    msg = str(exc).lower()
+                    if "attribute not found" in msg:
+                        # Return null value so the HUD shows "not_found" gracefully
+                        # instead of bubbling an error that triggers stub fallbacks.
+                        return {"id": req_id, "ok": True, "payload": {"value": None}}
+                    raise
 
             if typ == "usd.set_attr":
                 prim_path = payload.get("primPath", "")
