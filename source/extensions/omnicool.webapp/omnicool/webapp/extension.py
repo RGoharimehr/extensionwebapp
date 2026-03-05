@@ -517,6 +517,31 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                 prim_path = _pick_prim_path(norm_x, norm_y)
                 return {"id": req_id, "ok": True, "payload": {"primPath": prim_path or None}}
 
+            if typ == "usd.get_prim_info":
+                # Combined pick + attribute fetch for the prim-info HUD.
+                # Replaces the multi-round-trip sequence:
+                #   usd.pick → usd.list_attrs → N × usd.get_attr
+                # with a single request, halving latency for the I-key gesture.
+                norm_x = float(payload.get("x", 0.0))
+                norm_y = float(payload.get("y", 0.0))
+                max_attrs = int(payload.get("maxAttrs", 8))
+                prim_path = _pick_prim_path(norm_x, norm_y)
+                if not prim_path:
+                    return {"id": req_id, "ok": True, "payload": {"primPath": None, "attrs": []}}
+                attr_names = _list_attrs(stage, prim_path)[:max_attrs]
+                attr_values = []
+                for name in attr_names:
+                    try:
+                        val = _get_attr(stage, prim_path, name)
+                        attr_values.append({"name": name, "value": _json_safe(val)})
+                    except Exception:
+                        attr_values.append({"name": name, "value": None})
+                return {
+                    "id": req_id,
+                    "ok": True,
+                    "payload": {"primPath": prim_path, "attrs": attr_values},
+                }
+
             if typ == "usd.list_children":
                 prim_path = payload.get("primPath", "/World")
                 children = _list_children(stage, prim_path)
