@@ -261,13 +261,24 @@
       }
 
       /* ── Helpers ───────────────────────────────────────────────── */
+      /*
+       * Escape a value for use inside onclick="func('VALUE')".
+       * The value sits inside a '…' JS string inside a "…" HTML attribute,
+       * so we must both JS-escape (\ and ') and HTML-escape (& and ").
+       * Order: JS escapes first so the \ we introduce isn't touched by HTML
+       * escaping; & must come before " to avoid double-escaping &quot;.
+       */
       function _escJs(s) {
-        return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        return String(s)
+          .replace(/\\/g, '\\\\')   /* JS  : backslash  */
+          .replace(/'/g, "\\'")     /* JS  : single-quote */
+          .replace(/&/g, '&amp;')   /* HTML: ampersand (before &quot;!) */
+          .replace(/"/g, '&quot;'); /* HTML: double-quote */
       }
 
       /* ── Live attribute chart ──────────────────────────────────── */
       /*
-       * State: _chartTracks maps a unique key (primPath + NUL + attrName)
+       * State: _chartTracks maps a unique key (primPath + '|' + attrName)
        * to { primPath, attr, color, points:[{t,v}] }.
        * Polling runs on a setInterval shared across all tracked attrs.
        */
@@ -276,7 +287,14 @@
       var _chartTimer   = null;
       var CHART_COLORS  = ['#e94560','#64b5f6','#4caf50','#ffb300','#ce93d8'];
 
-      function _chartKey(primPath, attr) { return primPath + '\x00' + attr; }
+      /*
+       * Chart key: primPath and attrName joined by '|'.
+       * '|' does not appear in valid USD prim paths (which use '/') or
+       * attribute names (which use letters, digits, ':' and '_'), so it
+       * is a safe separator that survives embedding in HTML attributes —
+       * unlike '\x00', which browsers strip from attribute strings.
+       */
+      function _chartKey(primPath, attr) { return primPath + '|' + attr; }
 
       window._omniPinAttr = function (primPath, attr) {
         var key = _chartKey(primPath, attr);
