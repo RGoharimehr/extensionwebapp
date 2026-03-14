@@ -570,6 +570,9 @@
           ms.addTrack(evt.track);
           vid.srcObject = ms;
         }
+        // Browsers require an explicit play() after srcObject is set
+        // programmatically, even when the element has autoplay+muted.
+        vid.play().catch(() => {});
       };
 
       pc.onconnectionstatechange = () => {

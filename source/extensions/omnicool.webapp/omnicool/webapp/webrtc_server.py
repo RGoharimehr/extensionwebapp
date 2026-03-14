@@ -101,9 +101,13 @@ try:
             arr: Optional[Any] = None
             if self._frame_provider is not None:
                 try:
-                    arr = await asyncio.wait_for(
-                        self._frame_provider(), timeout=0.4
-                    )
+                    # Await the provider directly — _capture_viewport_frame_async
+                    # already enforces its own 1-second timeout internally, so an
+                    # extra outer wait_for is unnecessary and counterproductive
+                    # (a 0.4 s outer deadline would race and cancel the inner
+                    # coroutine before the render thread has a chance to deliver
+                    # the frame, resulting in permanent black/blank output).
+                    arr = await self._frame_provider()
                 except Exception:
                     arr = None
 
@@ -333,8 +337,9 @@ class WebRTCSignalingServer:
         # localDescription.sdp.  aiortc ≥ 1.3 awaits gathering inside
         # setLocalDescription, but older builds return before it finishes.
         # Polling avoids a hard dependency on a specific aiortc version.
-        _deadline = asyncio.get_event_loop().time() + 5.0
-        while pc.iceGatheringState != "complete" and asyncio.get_event_loop().time() < _deadline:
+        _loop = asyncio.get_running_loop()
+        _deadline = _loop.time() + 5.0
+        while pc.iceGatheringState != "complete" and _loop.time() < _deadline:
             await asyncio.sleep(0.05)
 
         return web.json_response(
