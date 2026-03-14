@@ -371,3 +371,67 @@ class TestWebRTCSignalingServer(omni.kit.test.AsyncTestCase):
                 self.assertIn("POST", resp.headers.get("Access-Control-Allow-Methods", ""))
 
         await self._server.stop()
+
+    # ------------------------------------------------------------------
+    # BGRA → RGB channel conversion in OmniViewportVideoTrack
+    # ------------------------------------------------------------------
+
+    async def test_viewport_track_recv_converts_bgra_to_rgb(self):
+        """
+        OmniViewportVideoTrack.recv() must rearrange BGRA channels to RGB.
+
+        A BGRA frame where R=255 G=0 B=0 (pure red in RGB = pure blue in BGRA)
+        is returned by the provider as [B=0, G=0, R=255, A=255].
+        After the BGRA→RGB conversion, channel [0] must be 255 (red).
+        """
+        import numpy as np
+        from omnicool.webapp.webrtc_server import OmniViewportVideoTrack
+
+        if OmniViewportVideoTrack is None:
+            self.skipTest("aiortc not installed")
+
+        import av
+
+        # Create a 2×2 BGRA frame encoding pure-red (R=255 G=0 B=0 A=255):
+        #   BGRA layout: [B=0, G=0, R=255, A=255]
+        bgra = np.zeros((2, 2, 4), dtype=np.uint8)
+        bgra[:, :, 2] = 255  # R channel (index 2 in BGRA)
+        bgra[:, :, 3] = 255  # A channel
+
+        async def _bgra_provider():
+            return bgra
+
+        track = OmniViewportVideoTrack(frame_provider=_bgra_provider)
+        frame = await asyncio.wait_for(track.recv(), timeout=5.0)
+
+        self.assertIsInstance(frame, av.VideoFrame)
+        rgb_arr = frame.to_ndarray(format="rgb24")
+        # After BGRA→RGB the first channel (R) must be 255
+        self.assertEqual(int(rgb_arr[0, 0, 0]), 255, "Red channel incorrect after BGRA→RGB conversion")
+        # Blue channel must be 0
+        self.assertEqual(int(rgb_arr[0, 0, 2]), 0, "Blue channel incorrect after BGRA→RGB conversion")
+
+    async def test_viewport_track_recv_handles_3channel_rgb(self):
+        """
+        OmniViewportVideoTrack.recv() must pass through a 3-channel RGB array
+        without corruption.
+        """
+        import numpy as np
+        from omnicool.webapp.webrtc_server import OmniViewportVideoTrack
+
+        if OmniViewportVideoTrack is None:
+            self.skipTest("aiortc not installed")
+
+        import av
+
+        # Pure green 2×2 RGB frame
+        rgb = np.zeros((2, 2, 3), dtype=np.uint8)
+        rgb[:, :, 1] = 200  # G=200
+
+        async def _rgb_provider():
+            return rgb
+
+        track = OmniViewportVideoTrack(frame_provider=_rgb_provider)
+        frame = await asyncio.wait_for(track.recv(), timeout=5.0)
+        rgb_out = frame.to_ndarray(format="rgb24")
+        self.assertEqual(int(rgb_out[0, 0, 1]), 200, "Green channel should be 200")

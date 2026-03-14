@@ -108,9 +108,12 @@ try:
                     arr = None
 
             if arr is not None:
-                # Drop alpha channel when the capture returned RGBA
+                # Handle both 3-channel (RGB) and 4-channel (BGRA) arrays.
+                # Kit's swapchain capture returns BGRA; rearrange to RGB for
+                # the aiortc encoder.  A plain 3-channel array from a test
+                # provider is passed through untouched.
                 if arr.ndim == 3 and arr.shape[2] == 4:
-                    arr = arr[:, :, :3]
+                    arr = arr[:, :, [2, 1, 0]]  # BGRA → RGB
                 frame = av.VideoFrame.from_ndarray(arr, format="rgb24")
             else:
                 # Placeholder: a black frame keeps the stream alive

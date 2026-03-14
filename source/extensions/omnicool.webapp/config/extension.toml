@@ -41,7 +41,7 @@ exts."omnicool.webapp".wsPort = 8899
 # Browsers post their SDP offer to http://<webrtcHost>:<webrtcPort>/webrtc/offer
 # and receive an SDP answer; the resulting RTCDataChannel uses the same
 # JSON message protocol as the WebSocket USD bridge.
-exts."omnicool.webapp".webrtcEnabled = false
+exts."omnicool.webapp".webrtcEnabled = true
 exts."omnicool.webapp".webrtcHost = "127.0.0.1"
 exts."omnicool.webapp".webrtcPort = 8900
 

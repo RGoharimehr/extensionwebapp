@@ -272,7 +272,7 @@ async def _capture_viewport_frame_async():
         import numpy as np
         import omni.renderer.capture as rc
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
 
         def _on_capture(buf, buf_size, width, height, format_enum):
@@ -280,7 +280,9 @@ async def _capture_viewport_frame_async():
                 return
             try:
                 arr = np.frombuffer(buf, dtype=np.uint8).copy()
-                arr = arr[: width * height * 4].reshape(height, width, 4)[:, :, :3]
+                # Omniverse swapchain is BGRA; rearrange channels to RGB for
+                # aiortc which encodes frames as rgb24.
+                arr = arr[: width * height * 4].reshape(height, width, 4)[:, :, [2, 1, 0]]
                 loop.call_soon_threadsafe(fut.set_result, arr)
             except Exception as exc:
                 loop.call_soon_threadsafe(fut.set_exception, exc)

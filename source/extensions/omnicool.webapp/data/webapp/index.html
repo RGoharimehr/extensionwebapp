@@ -20,6 +20,9 @@
       /* WebSocket endpoint of the Omniverse extension bridge.             */
       wsUrl: "ws://127.0.0.1:8899",
 
+      /* WebRTC signaling endpoint for the live viewport video stream.     */
+      webrtcUrl: "http://127.0.0.1:8900/webrtc/offer",
+
       /* How long the mouse must be held (ms) to trigger prim inspect.    */
       holdMs: 1000,
 
@@ -84,6 +87,41 @@
         font-family: 'Segoe UI', system-ui, sans-serif;
         color: #eee; min-width: 330px;
       }
+      /* ── WebRTC viewport overlay ────────────────────────────────── */
+      #omniRtcShowBtn {
+        position: fixed; bottom: 18px; left: 18px;
+        background: #16213e; border: 1px solid #3a3a6a; border-radius: 8px;
+        padding: 6px 12px; font-size: 12px; color: #eee; cursor: pointer;
+        z-index: 100003; font-family: 'Segoe UI', system-ui, sans-serif;
+        box-shadow: 0 3px 12px rgba(0,0,0,.5);
+      }
+      #omniRtcShowBtn:hover { background: #0f3460; }
+      #omniRtcPanel {
+        position: fixed; bottom: 18px; left: 18px;
+        background: #16213e; border: 1px solid #3a3a6a; border-radius: 8px;
+        z-index: 100003; font-family: 'Segoe UI', system-ui, sans-serif;
+        box-shadow: 0 6px 24px rgba(0,0,0,.6); display: none; overflow: hidden;
+      }
+      #omniRtcVideo {
+        display: block; width: 420px; height: 236px;
+        background: #000; object-fit: contain;
+      }
+      .omni-rtc-bar {
+        display: flex; align-items: center; gap: 6px;
+        padding: 5px 8px; background: rgba(0,0,0,.35);
+        font-size: 11px; color: #eee;
+      }
+      .omni-rtc-dot {
+        width: 7px; height: 7px; border-radius: 50%;
+        background: #f44336; flex-shrink: 0;
+      }
+      .omni-rtc-dot.connecting { background: #ff9800; }
+      .omni-rtc-dot.connected  { background: #4caf50; }
+      .omni-rtc-icon-btn {
+        cursor: pointer; background: transparent; border: none;
+        color: #aaa; font-size: 13px; padding: 0 2px; line-height: 1;
+      }
+      .omni-rtc-icon-btn:hover { color: #eee; }
     </style>
   </head>
   <body>
@@ -95,6 +133,21 @@
     <div id="omniPrimHud"></div>
     <!-- Live attribute chart: populated when an attribute row is clicked in the HUD -->
     <div id="omniAttrChart"></div>
+
+    <!-- WebRTC live viewport overlay — toggle button and video panel -->
+    <button id="omniRtcShowBtn"
+            onclick="window._omniRtcShow()"
+            title="Show live Omniverse viewport stream">📹 Viewport</button>
+    <div id="omniRtcPanel">
+      <div class="omni-rtc-bar">
+        <div class="omni-rtc-dot" id="omniRtcDot"></div>
+        <span id="omniRtcStatusLbl" style="flex:1;white-space:nowrap">Disconnected</span>
+        <button class="omni-rtc-icon-btn" onclick="window._omniRtcConnect()" title="Reconnect">↺</button>
+        <button class="omni-rtc-icon-btn" onclick="window._omniRtcHide()" title="Close">✕</button>
+      </div>
+      <!-- eslint-disable-next-line -->
+      <video id="omniRtcVideo" autoplay playsinline muted></video>
+    </div>
 
     <script src="/static/js/main.eb06dcd7.js"></script>
     <script>
@@ -448,6 +501,105 @@
       } else {
         _connect();
       }
+    })();
+    </script>
+    <script>
+    /* ── WebRTC live viewport overlay — self-contained IIFE ───────── */
+    (function () {
+      'use strict';
+
+      var cfg     = window.OMNICOOL_CONFIG || {};
+      var SIG_URL = cfg.webrtcUrl || 'http://127.0.0.1:8900/webrtc/offer';
+      var _pc = null;
+
+      function _dot() { return document.getElementById('omniRtcDot'); }
+      function _lbl() { return document.getElementById('omniRtcStatusLbl'); }
+
+      function _setStatus(s) {
+        var d = _dot(), l = _lbl();
+        if (!d || !l) return;
+        d.className = 'omni-rtc-dot'
+          + (s === 'connected'  ? ' connected'  : '')
+          + (s === 'connecting' ? ' connecting' : '');
+        l.textContent = s.charAt(0).toUpperCase() + s.slice(1);
+      }
+
+      window._omniRtcConnect = function () {
+        if (_pc) { _pc.close(); _pc = null; }
+        _setStatus('connecting');
+
+        var pc = new RTCPeerConnection({ iceServers: [] });
+        _pc = pc;
+
+        // Request a receive-only video stream from the signaling server.
+        // This adds a video m-line to the SDP offer so the server attaches
+        // the OmniViewportVideoTrack before returning its answer.
+        pc.addTransceiver('video', { direction: 'recvonly' });
+
+        pc.ontrack = function (evt) {
+          var vid = document.getElementById('omniRtcVideo');
+          if (!vid) return;
+          if (evt.streams && evt.streams[0]) {
+            vid.srcObject = evt.streams[0];
+          } else {
+            var ms = new MediaStream();
+            ms.addTrack(evt.track);
+            vid.srcObject = ms;
+          }
+        };
+
+        pc.onconnectionstatechange = function () {
+          var s = pc.connectionState;
+          _setStatus(s);
+          if (s === 'failed' || s === 'closed' || s === 'disconnected') {
+            _pc = null;
+          }
+        };
+
+        pc.createOffer()
+          .then(function (offer) { return pc.setLocalDescription(offer); })
+          .then(function () {
+            return fetch(SIG_URL, {
+              method:  'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body:    JSON.stringify({
+                sdp:  pc.localDescription.sdp,
+                type: pc.localDescription.type
+              })
+            });
+          })
+          .then(function (resp) {
+            if (!resp.ok) throw new Error('Signaling HTTP ' + resp.status);
+            return resp.json();
+          })
+          .then(function (answer) {
+            return pc.setRemoteDescription(new RTCSessionDescription(answer));
+          })
+          .catch(function (e) {
+            _pc = null;
+            _setStatus('disconnected');
+            console.warn('[omni-rtc] connection failed:', e.message);
+          });
+      };
+
+      window._omniRtcShow = function () {
+        var panel = document.getElementById('omniRtcPanel');
+        var btn   = document.getElementById('omniRtcShowBtn');
+        if (panel) panel.style.display = 'block';
+        if (btn)   btn.style.display   = 'none';
+        window._omniRtcConnect();
+      };
+
+      window._omniRtcHide = function () {
+        var panel = document.getElementById('omniRtcPanel');
+        var btn   = document.getElementById('omniRtcShowBtn');
+        if (panel) panel.style.display = 'none';
+        if (btn)   btn.style.display   = 'block';
+        var vid = document.getElementById('omniRtcVideo');
+        if (vid)  vid.srcObject = null;
+        if (_pc)  { _pc.close(); _pc = null; }
+        _setStatus('disconnected');
+      };
     })();
     </script>
   </body>
