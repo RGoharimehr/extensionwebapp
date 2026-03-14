@@ -287,3 +287,87 @@ class TestWebRTCSignalingServer(omni.kit.test.AsyncTestCase):
         await self._server.start(host="127.0.0.1", port=self._port)
         await self._server.stop()
         await self._server.stop()  # should not raise
+
+    # ------------------------------------------------------------------
+    # video_frame_provider parameter
+    # ------------------------------------------------------------------
+
+    async def test_video_frame_provider_stored(self):
+        """video_frame_provider passed to __init__ must be stored on the server."""
+        async def _dummy_provider():
+            return None
+
+        srv = WebRTCSignalingServer(
+            message_handler=_echo_handler,
+            video_frame_provider=_dummy_provider,
+        )
+        self.assertIs(srv._video_frame_provider, _dummy_provider)
+
+    async def test_video_frame_provider_defaults_to_none(self):
+        """video_frame_provider defaults to None when not supplied."""
+        srv = WebRTCSignalingServer(message_handler=_echo_handler)
+        self.assertIsNone(srv._video_frame_provider)
+
+    async def test_offer_with_video_transceiver_returns_video_section(self):
+        """
+        An SDP offer that includes a recvonly video transceiver must receive
+        an answer whose SDP contains a video m-line.
+
+        This verifies the end-to-end path:
+          browser offer (recvonly video) → server adds OmniViewportVideoTrack
+          → createAnswer() → SDP answer advertises m=video.
+        """
+        import numpy as np
+
+        async def _black_frame_provider():
+            """Return a tiny black frame for the test."""
+            return np.zeros((32, 32, 3), dtype=np.uint8)
+
+        port = _find_free_port()
+        srv = WebRTCSignalingServer(
+            message_handler=_echo_handler,
+            video_frame_provider=_black_frame_provider,
+        )
+        await srv.start(host="127.0.0.1", port=port)
+
+        # Build an offer that includes a recvonly video transceiver so the
+        # server knows it should attach the viewport video track.
+        pc_client = RTCPeerConnection()
+        pc_client.createDataChannel("test")
+        pc_client.addTransceiver("video", direction="recvonly")
+        offer = await pc_client.createOffer()
+        await pc_client.setLocalDescription(offer)
+        offer_sdp = pc_client.localDescription.sdp
+        await pc_client.close()
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"http://127.0.0.1:{port}/webrtc/offer",
+                json={"sdp": offer_sdp, "type": "offer"},
+            ) as resp:
+                self.assertEqual(resp.status, 200)
+                body = await resp.json()
+
+        await srv.stop()
+
+        # The answer SDP must advertise a video media section
+        self.assertIn("m=video", body["sdp"], "SDP answer missing video m-line")
+
+    async def test_options_preflight_returns_cors_headers(self):
+        """OPTIONS /webrtc/offer must return 200 with CORS allow headers."""
+        await self._server.start(host="127.0.0.1", port=self._port)
+
+        async with aiohttp.ClientSession() as session:
+            async with session.options(
+                f"http://127.0.0.1:{self._port}/webrtc/offer",
+                headers={"Origin": "http://localhost:3001",
+                         "Access-Control-Request-Method": "POST",
+                         "Access-Control-Request-Headers": "Content-Type"},
+            ) as resp:
+                self.assertEqual(resp.status, 200)
+                self.assertIn(
+                    resp.headers.get("Access-Control-Allow-Origin", ""), ["*", "http://localhost:3001"]
+                )
+                self.assertIn("POST", resp.headers.get("Access-Control-Allow-Methods", ""))
+
+        await self._server.stop()

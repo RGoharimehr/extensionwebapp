@@ -85,6 +85,16 @@
     .hud-attr-val  { color: var(--text); font-family: monospace; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .hud-empty { font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
     .hud-hint { font-size: 10px; color: var(--text-dim); margin-top: 7px; padding-top: 5px; border-top: 1px solid var(--border); }
+    /* ── WebRTC viewport panel ── */
+    #rtcPanel { display: none; background: #000; border-bottom: 1px solid var(--border); flex-shrink: 0; position: relative; height: 300px; }
+    #rtcPanel.show { display: flex; }
+    #rtcVideo { flex: 1; object-fit: contain; background: #000; height: 100%; display: block; }
+    .rtc-bar { position: absolute; bottom: 0; left: 0; right: 0; background: rgba(22,33,62,.88); display: flex; align-items: center; gap: 8px; padding: 5px 10px; font-size: 12px; }
+    .rtc-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--error); flex-shrink: 0; }
+    .rtc-dot.connected { background: var(--success); }
+    .rtc-dot.connecting { background: var(--warning); }
+    #rtcUrl { background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 4px 8px; border-radius: 3px; font-size: 11px; width: 240px; font-family: monospace; }
+    .rtc-note { font-size: 10px; color: var(--text-dim); margin-left: auto; }
   </style>
 </head>
 <body>
@@ -93,6 +103,10 @@
   <h1>🔷 USD Attribute Editor</h1>
   <div class="status-dot" id="dot"></div>
   <span class="status-label" id="statusLbl">Disconnected</span>
+  <button class="btn-secondary" id="rtcToggleBtn"
+          onclick="toggleRtcPanel()" title="Toggle live viewport stream">
+    📹 Viewport
+  </button>
   <div class="ws-row">
     <input id="wsUrl" value="ws://127.0.0.1:8899" placeholder="ws://host:port"/>
     <button class="btn-primary" id="connectBtn" onclick="toggleConnect()">Connect</button>
@@ -102,6 +116,19 @@
 <div class="sel-bar" id="selBar">
   📌 Viewport selection:&nbsp;<span id="selPaths" style="font-family:monospace"></span>
   <button class="btn-sm btn-secondary" onclick="loadFromSel()">Load</button>
+</div>
+
+<!-- Live viewport streaming panel (WebRTC) — hidden until toggled -->
+<div id="rtcPanel">
+  <!-- eslint-disable-next-line -->
+  <video id="rtcVideo" autoplay playsinline muted></video>
+  <div class="rtc-bar">
+    <div class="rtc-dot" id="rtcDot"></div>
+    <span id="rtcStatus" style="color:var(--text-dim)">Disconnected</span>
+    <input id="rtcUrl" value="" placeholder="http://127.0.0.1:8900/webrtc/offer"/>
+    <button class="btn-sm btn-primary" id="rtcConnBtn" onclick="rtcToggleConnect()">Connect</button>
+    <span class="rtc-note">Requires webrtcEnabled = true in extension.toml</span>
+  </div>
 </div>
 
 <main>
@@ -481,6 +508,111 @@
     const hud = document.getElementById('primHud');
     hud.style.display = 'none';
     if (hud._removeListeners) { hud._removeListeners(); hud._removeListeners = null; }
+  }
+
+  /* ── WebRTC viewport streaming ─────────────────────────────── */
+  let _rtcPc = null;
+
+  function toggleRtcPanel() {
+    const panel = document.getElementById('rtcPanel');
+    const btn   = document.getElementById('rtcToggleBtn');
+    if (panel.classList.toggle('show')) {
+      btn.style.background = 'var(--accent2)';
+      // Default signaling URL: same host as the page, port 8900
+      const sigUrl = document.getElementById('rtcUrl');
+      if (!sigUrl.value) {
+        sigUrl.value = window.location.protocol + '//' + window.location.hostname + ':8900/webrtc/offer';
+      }
+    } else {
+      btn.style.background = '';
+      rtcDisconnect();
+    }
+  }
+
+  function _setRtcStatus(s) {
+    const dot = document.getElementById('rtcDot');
+    const lbl = document.getElementById('rtcStatus');
+    const btn = document.getElementById('rtcConnBtn');
+    const states = { connected: ['connected',''], connecting: ['connecting',''], disconnected: ['',''] };
+    const [cls] = states[s] || states.disconnected;
+    dot.className = 'rtc-dot' + (cls ? ' ' + cls : '');
+    lbl.textContent = s.charAt(0).toUpperCase() + s.slice(1);
+    btn.textContent = s === 'connected' ? 'Disconnect' : 'Connect';
+    btn.disabled = s === 'connecting';
+  }
+
+  async function rtcConnect() {
+    const sigUrl = document.getElementById('rtcUrl').value.trim();
+    if (!sigUrl) { toast('Enter the signaling URL', true); return; }
+    if (_rtcPc) return;
+
+    _setRtcStatus('connecting');
+    try {
+      const pc = new RTCPeerConnection({ iceServers: [] });
+      _rtcPc = pc;
+
+      // Request a recvonly video stream from the server — this creates a
+      // video m-line in the SDP offer so the server knows to attach the
+      // OmniViewportVideoTrack before answering.
+      pc.addTransceiver('video', { direction: 'recvonly' });
+
+      // Attach the incoming video track to the <video> element as soon as
+      // the server sends it.
+      pc.ontrack = (evt) => {
+        const vid = document.getElementById('rtcVideo');
+        if (evt.streams && evt.streams[0]) {
+          vid.srcObject = evt.streams[0];
+        } else {
+          // Fallback for browsers that don't populate evt.streams
+          const ms = vid.srcObject instanceof MediaStream
+            ? vid.srcObject
+            : new MediaStream();
+          ms.addTrack(evt.track);
+          vid.srcObject = ms;
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        const s = pc.connectionState;
+        if (s === 'connected')   _setRtcStatus('connected');
+        if (s === 'connecting' || s === 'new') _setRtcStatus('connecting');
+        if (s === 'failed' || s === 'closed' || s === 'disconnected') {
+          _rtcPc = null;
+          _setRtcStatus('disconnected');
+        }
+      };
+
+      // Create the SDP offer (includes the recvonly video transceiver)
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      // Post the offer to the Kit signaling server
+      const resp = await fetch(sigUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+      });
+      if (!resp.ok) throw new Error('Signaling HTTP ' + resp.status);
+
+      const answer = await resp.json();
+      await pc.setRemoteDescription(new RTCSessionDescription(answer));
+    } catch (e) {
+      _rtcPc = null;
+      _setRtcStatus('disconnected');
+      toast('WebRTC error: ' + e.message, true);
+    }
+  }
+
+  function rtcDisconnect() {
+    if (_rtcPc) { _rtcPc.close(); _rtcPc = null; }
+    const vid = document.getElementById('rtcVideo');
+    vid.srcObject = null;
+    _setRtcStatus('disconnected');
+  }
+
+  function rtcToggleConnect() {
+    if (_rtcPc) rtcDisconnect();
+    else rtcConnect();
   }
 
   /* Auto-connect */

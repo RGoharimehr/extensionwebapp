@@ -243,6 +243,62 @@ def _json_safe(value):
 
 
 # -----------------------------
+# Viewport frame capture (WebRTC video source)
+# -----------------------------
+
+_capture_busy = False  # guard against re-entrant captures
+
+
+async def _capture_viewport_frame_async():
+    """
+    Capture the current swapchain frame as an RGB numpy array.
+
+    Schedules a GPU-side screenshot via ``omni.renderer.capture`` on the next
+    render tick.  The render-thread callback resolves an asyncio ``Future``
+    using ``loop.call_soon_threadsafe`` so the await is non-blocking.
+
+    Returns an ``(H, W, 3)`` uint8 numpy array, or ``None`` if the capture
+    timed out or failed (e.g. during startup before the first frame renders,
+    or in headless mode without a renderer).
+
+    A busy-flag prevents a queue of pending captures from building up when the
+    renderer is slower than the WebRTC frame rate.
+    """
+    global _capture_busy
+    if _capture_busy:
+        return None
+    _capture_busy = True
+    try:
+        import numpy as np
+        import omni.renderer.capture as rc
+
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future = loop.create_future()
+
+        def _on_capture(buf, buf_size, width, height, format_enum):
+            if fut.done():
+                return
+            try:
+                arr = np.frombuffer(buf, dtype=np.uint8).copy()
+                arr = arr[: width * height * 4].reshape(height, width, 4)[:, :, :3]
+                loop.call_soon_threadsafe(fut.set_result, arr)
+            except Exception as exc:
+                loop.call_soon_threadsafe(fut.set_exception, exc)
+
+        iface = rc.acquire_renderer_capture_interface()
+        iface.capture_next_frame_swapchain_async(_on_capture)
+        return await asyncio.wait_for(fut, timeout=1.0)
+    except asyncio.TimeoutError:
+        carb.log_warn("[omnicool.webapp][webrtc] viewport capture timed out — sending placeholder frame")
+        return None
+    except Exception as exc:
+        carb.log_warn(f"[omnicool.webapp][webrtc] viewport capture failed: {exc}")
+        return None
+    finally:
+        _capture_busy = False
+
+
+# -----------------------------
 # WebSocket server
 # -----------------------------
 async def _ensure_websockets_installed():
@@ -433,7 +489,11 @@ class OmnicoolWebAppExt(omni.ext.IExt):
         async def _run():
             try:
                 self._webrtc_server = WebRTCSignalingServer(
-                    message_handler=self._handle_ws_message
+                    message_handler=self._handle_ws_message,
+                    # Supply the viewport capture coroutine so every accepted
+                    # WebRTC offer gets a live video track added before the
+                    # SDP answer is created.
+                    video_frame_provider=_capture_viewport_frame_async,
                 )
                 await self._webrtc_server.start(
                     host=self._webrtc_host, port=self._webrtc_port
