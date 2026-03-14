@@ -45,6 +45,19 @@ exts."omnicool.webapp".webrtcEnabled = true
 exts."omnicool.webapp".webrtcHost = "127.0.0.1"
 exts."omnicool.webapp".webrtcPort = 8900
 
+# Video capture mode for the WebRTC live viewport stream.
+# "viewport" (default) — Omniverse renderer via omni.renderer.capture.
+# "desktop"            — full monitor capture via mss (cross-platform).
+#                        captureDisplay selects the monitor: 1 = first
+#                        physical monitor, 0 = all monitors merged.
+# "window"             — capture a specific window by title substring;
+#                        set captureWindowTitle to a partial window title
+#                        (e.g. "Omniverse" or "Chrome").  Falls back to
+#                        desktop capture when the window is not found.
+exts."omnicool.webapp".captureMode = "viewport"
+exts."omnicool.webapp".captureDisplay = 1
+exts."omnicool.webapp".captureWindowTitle = ""
+
 
 [[python.module]]  # Main python module this extension provides, it will be publicly available as "import omnicool.webapp"
 name = "omnicool.webapp"

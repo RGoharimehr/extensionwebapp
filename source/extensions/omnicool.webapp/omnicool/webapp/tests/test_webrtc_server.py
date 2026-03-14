@@ -26,6 +26,7 @@ crypto / ICE layers.
 
 import asyncio
 import json
+import sys
 import unittest
 
 import omni.kit.test
@@ -44,6 +45,19 @@ from omnicool.webapp.webrtc_server import (
     _import_aiortc,
     _import_aiohttp,
 )
+
+# ── capture-function helpers guard ───────────────────────────────────────────
+try:
+    from omnicool.webapp.extension import (
+        _get_capture_fn,
+        _capture_desktop_frame_async,
+        _capture_viewport_frame_async,
+        _capture_window_frame_async,
+        _get_window_region,
+    )
+    _HAVE_CAPTURE_FNS = True
+except ImportError:
+    _HAVE_CAPTURE_FNS = False
 
 
 # ---------------------------------------------------------------------------
@@ -435,3 +449,143 @@ class TestWebRTCSignalingServer(omni.kit.test.AsyncTestCase):
         frame = await asyncio.wait_for(track.recv(), timeout=5.0)
         rgb_out = frame.to_ndarray(format="rgb24")
         self.assertEqual(int(rgb_out[0, 0, 1]), 200, "Green channel should be 200")
+
+
+# ---------------------------------------------------------------------------
+# Tests for capture-mode dispatcher and desktop / window capture helpers
+# ---------------------------------------------------------------------------
+
+@unittest.skipUnless(_HAVE_CAPTURE_FNS, "omnicool.webapp.extension not importable")
+class TestCaptureFunctions(omni.kit.test.AsyncTestCase):
+    """Tests for _get_capture_fn dispatcher and desktop/window capture helpers."""
+
+    # ------------------------------------------------------------------
+    # _get_capture_fn dispatcher
+    # ------------------------------------------------------------------
+
+    async def test_get_capture_fn_viewport_returns_viewport_fn(self):
+        """_get_capture_fn('viewport', ...) must return _capture_viewport_frame_async."""
+        fn = _get_capture_fn("viewport", 1, "")
+        self.assertIs(fn, _capture_viewport_frame_async)
+
+    async def test_get_capture_fn_unknown_mode_returns_viewport_fn(self):
+        """_get_capture_fn with an unknown mode must fall back to viewport."""
+        fn = _get_capture_fn("nonexistent_mode", 1, "")
+        self.assertIs(fn, _capture_viewport_frame_async)
+
+    async def test_get_capture_fn_desktop_returns_callable(self):
+        """_get_capture_fn('desktop', ...) must return a callable."""
+        fn = _get_capture_fn("desktop", 1, "")
+        self.assertTrue(callable(fn))
+        self.assertIsNot(fn, _capture_viewport_frame_async)
+
+    async def test_get_capture_fn_window_returns_callable(self):
+        """_get_capture_fn('window', ...) must return a callable."""
+        fn = _get_capture_fn("window", 1, "MyApp")
+        self.assertTrue(callable(fn))
+        self.assertIsNot(fn, _capture_viewport_frame_async)
+
+    async def test_get_capture_fn_desktop_fn_returns_none_or_array_when_no_display(self):
+        """
+        The desktop capture function returned by _get_capture_fn('desktop', …)
+        must return None gracefully (not raise) when no display is available
+        (e.g. CI / headless Linux without $DISPLAY).
+        """
+        fn = _get_capture_fn("desktop", 1, "")
+        result = await asyncio.wait_for(fn(), timeout=5.0)
+        # In a headless environment mss raises ScreenShotError; the wrapper
+        # catches it and returns None.  On a real display it returns an ndarray.
+        if result is not None:
+            import numpy as np
+            self.assertIsInstance(result, np.ndarray)
+            self.assertEqual(result.ndim, 3)
+            self.assertEqual(result.shape[2], 3)
+
+    async def test_get_capture_fn_window_fn_returns_none_or_array_when_no_display(self):
+        """
+        The window capture function must return None gracefully when the title
+        is not found and the desktop fallback also fails (no display).
+        """
+        fn = _get_capture_fn("window", 1, "__nonexistent_window_title_xyz__")
+        result = await asyncio.wait_for(fn(), timeout=10.0)
+        if result is not None:
+            import numpy as np
+            self.assertIsInstance(result, np.ndarray)
+            self.assertEqual(result.ndim, 3)
+            self.assertEqual(result.shape[2], 3)
+
+    # ------------------------------------------------------------------
+    # _capture_desktop_frame_async directly
+    # ------------------------------------------------------------------
+
+    async def test_capture_desktop_frame_async_returns_none_or_ndarray(self):
+        """_capture_desktop_frame_async must not raise; returns ndarray or None."""
+        result = await asyncio.wait_for(_capture_desktop_frame_async(1), timeout=5.0)
+        if result is not None:
+            import numpy as np
+            self.assertIsInstance(result, np.ndarray)
+            self.assertEqual(result.ndim, 3)
+            self.assertEqual(result.shape[2], 3, "Expected (H, W, 3) RGB")
+
+    async def test_capture_desktop_frame_async_display_0_does_not_raise(self):
+        """display_idx=0 (all monitors) must not raise even on headless systems."""
+        result = await asyncio.wait_for(_capture_desktop_frame_async(0), timeout=5.0)
+        # Just verify it doesn't raise — result may be None on headless CI
+        self.assertTrue(result is None or hasattr(result, "shape"))
+
+    async def test_capture_desktop_frame_async_out_of_range_display_does_not_raise(self):
+        """An out-of-range display_idx must fall back gracefully."""
+        result = await asyncio.wait_for(_capture_desktop_frame_async(999), timeout=5.0)
+        self.assertTrue(result is None or hasattr(result, "shape"))
+
+    # ------------------------------------------------------------------
+    # _get_window_region helper
+    # ------------------------------------------------------------------
+
+    async def test_get_window_region_empty_title_returns_none(self):
+        """_get_window_region('') must return None immediately."""
+        region = _get_window_region("")
+        self.assertIsNone(region)
+
+    async def test_get_window_region_nonexistent_title_returns_none(self):
+        """_get_window_region with a title that matches nothing must return None."""
+        region = _get_window_region("__no_such_window_abc123xyz__")
+        self.assertIsNone(region)
+
+    async def test_get_window_region_returns_valid_dict_or_none(self):
+        """
+        When a matching window is found, the returned dict must have the
+        expected mss-compatible keys with positive integer values.
+        """
+        # Use a window title that is highly unlikely to exist so we can test
+        # the "not found → None" branch.  If it ever does match, verify shape.
+        region = _get_window_region("__probe_window_title_12345__")
+        if region is not None:
+            for key in ("top", "left", "width", "height"):
+                self.assertIn(key, region)
+            self.assertGreater(region["width"], 0)
+            self.assertGreater(region["height"], 0)
+
+    # ------------------------------------------------------------------
+    # Integration: desktop provider → OmniViewportVideoTrack
+    # ------------------------------------------------------------------
+
+    async def test_desktop_provider_as_video_track_frame_provider(self):
+        """
+        A desktop capture provider must integrate with OmniViewportVideoTrack:
+        recv() must return a valid VideoFrame (or a placeholder if no display).
+        """
+        from omnicool.webapp.webrtc_server import OmniViewportVideoTrack
+        if OmniViewportVideoTrack is None:
+            self.skipTest("aiortc not installed")
+
+        import av
+        import numpy as np
+
+        desktop_provider = _get_capture_fn("desktop", 1, "")
+        track = OmniViewportVideoTrack(frame_provider=desktop_provider)
+        frame = await asyncio.wait_for(track.recv(), timeout=5.0)
+        self.assertIsInstance(frame, av.VideoFrame)
+        # Frame must be a valid 2-D image (width × height > 0)
+        self.assertGreater(frame.width, 0)
+        self.assertGreater(frame.height, 0)
