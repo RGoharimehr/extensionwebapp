@@ -329,6 +329,14 @@ class WebRTCSignalingServer:
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
 
+        # Safety: wait until ICE gathering is complete before reading
+        # localDescription.sdp.  aiortc ≥ 1.3 awaits gathering inside
+        # setLocalDescription, but older builds return before it finishes.
+        # Polling avoids a hard dependency on a specific aiortc version.
+        _deadline = asyncio.get_event_loop().time() + 5.0
+        while pc.iceGatheringState != "complete" and asyncio.get_event_loop().time() < _deadline:
+            await asyncio.sleep(0.05)
+
         return web.json_response(
             {
                 "sdp": pc.localDescription.sdp,

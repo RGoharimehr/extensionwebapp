@@ -586,6 +586,23 @@
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
+      // Wait for ICE candidate gathering to complete so the offer SDP
+      // contains all a=candidate lines before we POST it to the server.
+      // Without this wait the offer has no candidates, the ICE transport
+      // never connects, and ontrack never fires on the browser.
+      await new Promise((resolve) => {
+        if (pc.iceGatheringState === 'complete') { resolve(); return; }
+        const _onchange = () => {
+          if (pc.iceGatheringState === 'complete') {
+            pc.removeEventListener('icegatheringstatechange', _onchange);
+            resolve();
+          }
+        };
+        pc.addEventListener('icegatheringstatechange', _onchange);
+        // Safety valve: 4 s maximum wait
+        setTimeout(resolve, 4000);
+      });
+
       // Post the offer to the Kit signaling server
       const resp = await fetch(sigUrl, {
         method: 'POST',

@@ -524,6 +524,27 @@
         l.textContent = s.charAt(0).toUpperCase() + s.slice(1);
       }
 
+      /**
+       * Return a Promise that resolves when the RTCPeerConnection has finished
+       * gathering ICE candidates (iceGatheringState === 'complete').
+       * A 4-second safety timeout prevents the chain from hanging if gathering
+       * never completes (e.g. no network interfaces available).
+       */
+      function _waitForIce(pc) {
+        return new Promise(function (resolve) {
+          if (pc.iceGatheringState === 'complete') { resolve(); return; }
+          function _onchange() {
+            if (pc.iceGatheringState === 'complete') {
+              pc.removeEventListener('icegatheringstatechange', _onchange);
+              resolve();
+            }
+          }
+          pc.addEventListener('icegatheringstatechange', _onchange);
+          // Safety valve: never stall the signaling chain more than 4 s
+          setTimeout(resolve, 4000);
+        });
+      }
+
       window._omniRtcConnect = function () {
         if (_pc) { _pc.close(); _pc = null; }
         _setStatus('connecting');
@@ -558,6 +579,10 @@
 
         pc.createOffer()
           .then(function (offer) { return pc.setLocalDescription(offer); })
+          // ── Wait for ICE gathering before POSTing the offer ──────────────
+          // Without this wait the offer SDP has no a=candidate lines and the
+          // ICE transport can never connect, so ontrack never fires.
+          .then(function () { return _waitForIce(pc); })
           .then(function () {
             return fetch(SIG_URL, {
               method:  'POST',
