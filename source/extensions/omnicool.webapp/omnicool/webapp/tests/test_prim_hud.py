@@ -114,3 +114,58 @@ class TestPrimHud(omni.kit.test.AsyncTestCase):
 
         val = _get_attr(stage, "/World/Cube", "size")
         self.assertAlmostEqual(float(val), 2.0, places=4)
+
+    # ------------------------------------------------------------------
+    # usd.get_prim_info — combined pick + attribute fetch (HUD shortcut)
+    # ------------------------------------------------------------------
+
+    async def test_get_prim_info_returns_prim_path_and_attrs(self):
+        """
+        usd.get_prim_info with a prim selected returns primPath and attrs list.
+
+        This is the single-request path used by the I-key + long-press HUD to
+        avoid multiple serial round-trips (pick → list_attrs → N × get_attr).
+        """
+        import omni.usd
+        from omnicool.webapp.extension import OmnicoolWebAppExt
+
+        ctx = omni.usd.get_context()
+        ctx.get_selection().set_selected_prim_paths(["/World/Cube"], False)
+
+        ext = OmnicoolWebAppExt.__new__(OmnicoolWebAppExt)
+        resp = await ext._handle_ws_message(json.dumps({
+            "id": "hud-1",
+            "type": "usd.get_prim_info",
+            "payload": {"x": 0.5, "y": 0.5, "maxAttrs": 4},
+        }))
+
+        self.assertTrue(resp["ok"], resp.get("error"))
+        p = resp["payload"]
+        self.assertEqual(p["primPath"], "/World/Cube")
+        self.assertIsInstance(p["attrs"], list)
+        # Every entry must have 'name' and 'value' keys
+        for entry in p["attrs"]:
+            self.assertIn("name", entry)
+            self.assertIn("value", entry)
+        # maxAttrs=4 must be respected
+        self.assertLessEqual(len(p["attrs"]), 4)
+
+    async def test_get_prim_info_no_selection_returns_null_path(self):
+        """usd.get_prim_info with nothing selected returns primPath: null."""
+        import omni.usd
+        from omnicool.webapp.extension import OmnicoolWebAppExt
+
+        ctx = omni.usd.get_context()
+        ctx.get_selection().clear_selected_prim_paths()
+
+        ext = OmnicoolWebAppExt.__new__(OmnicoolWebAppExt)
+        resp = await ext._handle_ws_message(json.dumps({
+            "id": "hud-2",
+            "type": "usd.get_prim_info",
+            "payload": {"x": 0.5, "y": 0.5},
+        }))
+
+        self.assertTrue(resp["ok"], resp.get("error"))
+        p = resp["payload"]
+        self.assertIsNone(p["primPath"])
+        self.assertEqual(p["attrs"], [])

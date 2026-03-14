@@ -71,6 +71,30 @@
     #toast.err { border-left-color: var(--error); }
     /* ── Scrollbar ── */
     ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+    /* ── I-key inspect mode ── */
+    body.i-mode, body.i-mode * { cursor: crosshair !important; }
+    #iKeyHint { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(233,69,96,.88); color: #fff; text-align: center; padding: 6px 12px; font-size: 12px; font-weight: 500; display: none; z-index: 300; pointer-events: none; }
+    body.i-mode #iKeyHint { display: block; }
+    #iKeyHint.armed { background: rgba(83,52,131,.92); }
+    /* ── Prim info HUD ── */
+    #primHud { position: fixed; background: var(--surface); border: 1px solid var(--accent); border-radius: 7px; padding: 11px 15px 9px; min-width: 240px; max-width: 380px; box-shadow: 0 6px 24px rgba(0,0,0,.55); z-index: 400; display: none; }
+    .hud-path { font-family: monospace; color: var(--accent); font-size: 13px; font-weight: 600; margin-bottom: 7px; word-break: break-all; }
+    .hud-tbl { width: 100%; border-collapse: collapse; font-size: 11px; }
+    .hud-tbl td { padding: 2px 8px 2px 0; vertical-align: top; }
+    .hud-attr-name { color: #64b5f6; font-family: monospace; white-space: nowrap; }
+    .hud-attr-val  { color: var(--text); font-family: monospace; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .hud-empty { font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
+    .hud-hint { font-size: 10px; color: var(--text-dim); margin-top: 7px; padding-top: 5px; border-top: 1px solid var(--border); }
+    /* ── WebRTC viewport panel ── */
+    #rtcPanel { display: none; background: #000; border-bottom: 1px solid var(--border); flex-shrink: 0; position: relative; height: 300px; }
+    #rtcPanel.show { display: flex; }
+    #rtcVideo { flex: 1; object-fit: contain; background: #000; height: 100%; display: block; }
+    .rtc-bar { position: absolute; bottom: 0; left: 0; right: 0; background: rgba(22,33,62,.88); display: flex; align-items: center; gap: 8px; padding: 5px 10px; font-size: 12px; }
+    .rtc-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--error); flex-shrink: 0; }
+    .rtc-dot.connected { background: var(--success); }
+    .rtc-dot.connecting { background: var(--warning); }
+    #rtcUrl { background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 4px 8px; border-radius: 3px; font-size: 11px; width: 240px; font-family: monospace; }
+    .rtc-note { font-size: 10px; color: var(--text-dim); margin-left: auto; }
   </style>
 </head>
 <body>
@@ -79,6 +103,10 @@
   <h1>🔷 USD Attribute Editor</h1>
   <div class="status-dot" id="dot"></div>
   <span class="status-label" id="statusLbl">Disconnected</span>
+  <button class="btn-secondary" id="rtcToggleBtn"
+          onclick="toggleRtcPanel()" title="Toggle live viewport stream">
+    📹 Viewport
+  </button>
   <div class="ws-row">
     <input id="wsUrl" value="ws://127.0.0.1:8899" placeholder="ws://host:port"/>
     <button class="btn-primary" id="connectBtn" onclick="toggleConnect()">Connect</button>
@@ -88,6 +116,19 @@
 <div class="sel-bar" id="selBar">
   📌 Viewport selection:&nbsp;<span id="selPaths" style="font-family:monospace"></span>
   <button class="btn-sm btn-secondary" onclick="loadFromSel()">Load</button>
+</div>
+
+<!-- Live viewport streaming panel (WebRTC) — hidden until toggled -->
+<div id="rtcPanel">
+  <!-- eslint-disable-next-line -->
+  <video id="rtcVideo" autoplay playsinline muted></video>
+  <div class="rtc-bar">
+    <div class="rtc-dot" id="rtcDot"></div>
+    <span id="rtcStatus" style="color:var(--text-dim)">Disconnected</span>
+    <input id="rtcUrl" value="" placeholder="http://127.0.0.1:8900/webrtc/offer"/>
+    <button class="btn-sm btn-primary" id="rtcConnBtn" onclick="rtcToggleConnect()">Connect</button>
+    <span class="rtc-note">Requires webrtcEnabled = true in extension.toml</span>
+  </div>
 </div>
 
 <main>
@@ -148,6 +189,9 @@
     </div>
   </div>
 </main>
+
+<div id="iKeyHint">🔍 Inspect mode — hold the mouse button for 1 second to read prim attributes</div>
+<div id="primHud"></div>
 
 <div id="toast"></div>
 
@@ -365,6 +409,210 @@
   }
   function esc(s) {
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  /* ── Prim info HUD (hold I + long-press for 1 s) ─────────────────────── */
+  let _iKeyActive = false;
+  let _pickTimer  = null;
+  const _HOLD_MS  = 1000;  // long-press threshold in ms
+
+  document.addEventListener('keydown', (e) => {
+    if ((e.key === 'i' || e.key === 'I') && !e.repeat && !e.ctrlKey && !e.metaKey) {
+      _iKeyActive = true;
+      document.body.classList.add('i-mode');
+    }
+  });
+
+  document.addEventListener('keyup', (e) => {
+    if (e.key === 'i' || e.key === 'I') {
+      _iKeyActive = false;
+      document.body.classList.remove('i-mode');
+      _cancelPickTimer();
+    }
+  });
+
+  document.addEventListener('mousedown', (e) => {
+    if (!_iKeyActive || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const cx = e.clientX, cy = e.clientY;
+    document.getElementById('iKeyHint').classList.add('armed');
+    _pickTimer = setTimeout(() => {
+      document.getElementById('iKeyHint').classList.remove('armed');
+      _triggerPrimInspect(cx, cy);
+    }, _HOLD_MS);
+  });
+
+  document.addEventListener('mouseup', () => {
+    document.getElementById('iKeyHint').classList.remove('armed');
+    _cancelPickTimer();
+  });
+
+  function _cancelPickTimer() {
+    if (_pickTimer) { clearTimeout(_pickTimer); _pickTimer = null; }
+  }
+
+  async function _triggerPrimInspect(cx, cy) {
+    const normX = cx / window.innerWidth;
+    const normY = cy / window.innerHeight;
+    try {
+      const data = await send('usd.get_prim_info', { x: normX, y: normY, maxAttrs: 10 });
+      _showPrimHud(cx, cy, data.primPath, data.attrs || []);
+    } catch (e) {
+      toast('Inspect failed: ' + e.message, true);
+    }
+  }
+
+  function _showPrimHud(cx, cy, primPath, attrs) {
+    const hud = document.getElementById('primHud');
+    if (!primPath) {
+      hud.innerHTML = '<div class="hud-path">No prim found at cursor</div>'
+        + '<div class="hud-hint">Select a prim in the viewport, then try again.</div>';
+    } else {
+      const rows = attrs.map(({ name, value }) =>
+        `<tr><td class="hud-attr-name">${esc(name)}</td>`
+        + `<td class="hud-attr-val">${esc(fmtVal(value))}</td></tr>`
+      ).join('');
+      hud.innerHTML = `<div class="hud-path">${esc(primPath)}</div>`
+        + (rows
+            ? `<table class="hud-tbl"><tbody>${rows}</tbody></table>`
+            : '<div class="hud-empty">No attributes on this prim</div>')
+        + '<div class="hud-hint">Click this panel or press Esc to dismiss  ·  Click <em>Load</em> to open in editor</div>'
+        + `<div style="margin-top:6px"><button class="btn-sm btn-primary" onclick="selectPrim('${esc(primPath)}');_hidePrimHud()">Load in editor</button></div>`;
+    }
+
+    // Position HUD near the click, clamped to the viewport
+    const pad = 12;
+    let left = cx + pad, top = cy + pad;
+    // Defer layout measurement until the HUD is visible
+    hud.style.display = 'block';
+    const rect = hud.getBoundingClientRect();
+    if (left + rect.width  > window.innerWidth)  left = cx - rect.width  - pad;
+    if (top  + rect.height > window.innerHeight) top  = cy - rect.height - pad;
+    hud.style.left = Math.max(0, left) + 'px';
+    hud.style.top  = Math.max(0, top)  + 'px';
+
+    // Close on Escape or a click outside the HUD
+    const _onKey = (e) => { if (e.key === 'Escape') _hidePrimHud(); };
+    const _onClickOutside = (e) => { if (!hud.contains(e.target)) _hidePrimHud(); };
+    setTimeout(() => {
+      document.addEventListener('keydown', _onKey);
+      document.addEventListener('mousedown', _onClickOutside);
+    }, 50);
+
+    hud._removeListeners = () => {
+      document.removeEventListener('keydown', _onKey);
+      document.removeEventListener('mousedown', _onClickOutside);
+    };
+  }
+
+  function _hidePrimHud() {
+    const hud = document.getElementById('primHud');
+    hud.style.display = 'none';
+    if (hud._removeListeners) { hud._removeListeners(); hud._removeListeners = null; }
+  }
+
+  /* ── WebRTC viewport streaming ─────────────────────────────── */
+  let _rtcPc = null;
+
+  function toggleRtcPanel() {
+    const panel = document.getElementById('rtcPanel');
+    const btn   = document.getElementById('rtcToggleBtn');
+    if (panel.classList.toggle('show')) {
+      btn.style.background = 'var(--accent2)';
+      // Default signaling URL: same host as the page, port 8900
+      const sigUrl = document.getElementById('rtcUrl');
+      if (!sigUrl.value) {
+        sigUrl.value = window.location.protocol + '//' + window.location.hostname + ':8900/webrtc/offer';
+      }
+    } else {
+      btn.style.background = '';
+      rtcDisconnect();
+    }
+  }
+
+  function _setRtcStatus(s) {
+    const dot = document.getElementById('rtcDot');
+    const lbl = document.getElementById('rtcStatus');
+    const btn = document.getElementById('rtcConnBtn');
+    const states = { connected: ['connected',''], connecting: ['connecting',''], disconnected: ['',''] };
+    const [cls] = states[s] || states.disconnected;
+    dot.className = 'rtc-dot' + (cls ? ' ' + cls : '');
+    lbl.textContent = s.charAt(0).toUpperCase() + s.slice(1);
+    btn.textContent = s === 'connected' ? 'Disconnect' : 'Connect';
+    btn.disabled = s === 'connecting';
+  }
+
+  async function rtcConnect() {
+    const sigUrl = document.getElementById('rtcUrl').value.trim();
+    if (!sigUrl) { toast('Enter the signaling URL', true); return; }
+    if (_rtcPc) return;
+
+    _setRtcStatus('connecting');
+    try {
+      const pc = new RTCPeerConnection({ iceServers: [] });
+      _rtcPc = pc;
+
+      // Request a recvonly video stream from the server — this creates a
+      // video m-line in the SDP offer so the server knows to attach the
+      // OmniViewportVideoTrack before answering.
+      pc.addTransceiver('video', { direction: 'recvonly' });
+
+      // Attach the incoming video track to the <video> element as soon as
+      // the server sends it.
+      pc.ontrack = (evt) => {
+        const vid = document.getElementById('rtcVideo');
+        if (evt.streams && evt.streams[0]) {
+          vid.srcObject = evt.streams[0];
+        } else {
+          // Fallback for browsers that don't populate evt.streams
+          const ms = vid.srcObject instanceof MediaStream
+            ? vid.srcObject
+            : new MediaStream();
+          ms.addTrack(evt.track);
+          vid.srcObject = ms;
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        const s = pc.connectionState;
+        if (s === 'connected')   _setRtcStatus('connected');
+        if (s === 'connecting' || s === 'new') _setRtcStatus('connecting');
+        if (s === 'failed' || s === 'closed' || s === 'disconnected') {
+          _rtcPc = null;
+          _setRtcStatus('disconnected');
+        }
+      };
+
+      // Create the SDP offer (includes the recvonly video transceiver)
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      // Post the offer to the Kit signaling server
+      const resp = await fetch(sigUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+      });
+      if (!resp.ok) throw new Error('Signaling HTTP ' + resp.status);
+
+      const answer = await resp.json();
+      await pc.setRemoteDescription(new RTCSessionDescription(answer));
+    } catch (e) {
+      _rtcPc = null;
+      _setRtcStatus('disconnected');
+      toast('WebRTC error: ' + e.message, true);
+    }
+  }
+
+  function rtcDisconnect() {
+    if (_rtcPc) { _rtcPc.close(); _rtcPc = null; }
+    const vid = document.getElementById('rtcVideo');
+    vid.srcObject = null;
+    _setRtcStatus('disconnected');
+  }
+
+  function rtcToggleConnect() {
+    if (_rtcPc) rtcDisconnect();
+    else rtcConnect();
   }
 
   /* Auto-connect */

@@ -62,6 +62,74 @@ MessageHandler = Callable[[str], Awaitable[dict]]
 
 
 # ---------------------------------------------------------------------------
+# Optional: viewport video track
+# ---------------------------------------------------------------------------
+
+try:
+    # aiortc ships VideoStreamTrack; av (PyAV) ships VideoFrame.
+    # Both are installed as dependencies of aiortc, so if aiortc is present
+    # then both are available.
+    from aiortc.mediastreams import VideoStreamTrack as _VideoStreamTrack  # noqa: F401
+
+    class OmniViewportVideoTrack(_VideoStreamTrack):
+        """
+        A WebRTC video track that streams frames from the Omniverse viewport.
+
+        ``frame_provider`` is an async callable that returns a numpy ndarray of
+        shape ``(H, W, 3)`` or ``(H, W, 4)`` in uint8 RGB/RGBA order, or
+        ``None`` when no frame is available yet.  A black 1280×720 placeholder
+        frame is sent whenever the provider returns ``None`` so the
+        ``RTCPeerConnection`` stays alive while the renderer is warming up.
+
+        The caller (``extension.py``) supplies ``_capture_viewport_frame_async``
+        as the provider.
+        """
+
+        kind = "video"
+
+        def __init__(self, frame_provider: Optional[Callable] = None) -> None:
+            super().__init__()
+            self._frame_provider = frame_provider
+            self._blank: Optional[Any] = None  # lazily-created black numpy array
+
+        async def recv(self):  # -> av.VideoFrame
+            import av
+            import numpy as np
+
+            pts, time_base = await self.next_timestamp()
+
+            arr: Optional[Any] = None
+            if self._frame_provider is not None:
+                try:
+                    arr = await asyncio.wait_for(
+                        self._frame_provider(), timeout=0.4
+                    )
+                except Exception:
+                    arr = None
+
+            if arr is not None:
+                # Handle both 3-channel (RGB) and 4-channel (BGRA) arrays.
+                # Kit's swapchain capture returns BGRA; rearrange to RGB for
+                # the aiortc encoder.  A plain 3-channel array from a test
+                # provider is passed through untouched.
+                if arr.ndim == 3 and arr.shape[2] == 4:
+                    arr = arr[:, :, [2, 1, 0]]  # BGRA → RGB
+                frame = av.VideoFrame.from_ndarray(arr, format="rgb24")
+            else:
+                # Placeholder: a black frame keeps the stream alive
+                if self._blank is None:
+                    self._blank = np.zeros((720, 1280, 3), dtype=np.uint8)
+                frame = av.VideoFrame.from_ndarray(self._blank, format="rgb24")
+
+            frame.pts = pts
+            frame.time_base = time_base
+            return frame
+
+except ImportError:
+    OmniViewportVideoTrack = None  # type: ignore[misc,assignment]
+
+
+# ---------------------------------------------------------------------------
 # Dependency helpers
 # ---------------------------------------------------------------------------
 
@@ -147,13 +215,27 @@ class WebRTCSignalingServer:
 
     Lifecycle
     ---------
-    1. Caller provides a ``message_handler`` coroutine.
+    1. Caller provides a ``message_handler`` coroutine and, optionally, a
+       ``video_frame_provider`` coroutine that returns viewport frames.
     2. Call ``start(host, port)``  to begin serving.
     3. Call ``stop()``             to shut down cleanly.
+
+    Video streaming
+    ---------------
+    When ``video_frame_provider`` is supplied and aiortc is installed, an
+    :class:`OmniViewportVideoTrack` is added to every new
+    ``RTCPeerConnection`` before the SDP answer is created.  The browser
+    peer must include a ``recvonly`` video transceiver in its offer for the
+    video m-line to be negotiated.
     """
 
-    def __init__(self, message_handler: MessageHandler):
+    def __init__(
+        self,
+        message_handler: MessageHandler,
+        video_frame_provider: Optional[Callable] = None,
+    ) -> None:
         self._message_handler = message_handler
+        self._video_frame_provider = video_frame_provider
         self._sessions: Set[_PeerSession] = set()
         self._runner = None
         self._site = None
@@ -176,6 +258,7 @@ class WebRTCSignalingServer:
 
         app = web.Application()
         app.router.add_post("/webrtc/offer", self._handle_offer)
+        app.router.add_route("OPTIONS", "/webrtc/offer", self._handle_options)
         app.router.add_get("/webrtc/status", self._handle_status)
 
         self._runner = web.AppRunner(app)
@@ -232,6 +315,17 @@ class WebRTCSignalingServer:
 
         offer = RTCSessionDescription(sdp=sdp, type=sdp_type)
         await pc.setRemoteDescription(offer)
+
+        # Add a viewport video track so the browser <video> element receives
+        # the Omniverse renderer output.  The track must be added AFTER
+        # setRemoteDescription (so we know what the offer contains) and BEFORE
+        # createAnswer() so the SDP answer advertises the video m-line.
+        # If the browser offer contains no video transceiver the track is
+        # silently ignored during SDP negotiation.
+        if OmniViewportVideoTrack is not None and self._video_frame_provider is not None:
+            pc.addTrack(OmniViewportVideoTrack(frame_provider=self._video_frame_provider))
+            log.debug("[webrtc] viewport video track added to peer connection")
+
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
 
@@ -241,6 +335,24 @@ class WebRTCSignalingServer:
                 "type": pc.localDescription.type,
             },
             headers={"Access-Control-Allow-Origin": "*"},
+        )
+
+    async def _handle_options(self, request) -> Any:
+        """
+        OPTIONS /webrtc/offer
+        Respond to the browser CORS preflight so cross-origin ``fetch()``
+        calls (e.g., from http://localhost:3001 to http://localhost:8900)
+        are allowed without a browser security error.
+        """
+        import aiohttp.web as web
+
+        return web.Response(
+            status=200,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type",
+            },
         )
 
     async def _handle_status(self, request) -> Any:
