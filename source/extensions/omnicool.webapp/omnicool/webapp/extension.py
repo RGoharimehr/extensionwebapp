@@ -552,6 +552,8 @@ class OmnicoolWebAppExt(omni.ext.IExt):
         self._capture_mode = str(settings.get(f"{base}/captureMode") or "viewport")
         self._capture_display = int(settings.get(f"{base}/captureDisplay") or 1)
         self._capture_window_title = str(settings.get(f"{base}/captureWindowTitle") or "")
+        self._capture_width = int(settings.get(f"{base}/captureWidth") or 1280)
+        self._capture_height = int(settings.get(f"{base}/captureHeight") or 720)
 
         mgr = omni.kit.app.get_app().get_extension_manager()
         ext_path = mgr.get_extension_path(ext_id)
@@ -562,7 +564,8 @@ class OmnicoolWebAppExt(omni.ext.IExt):
         carb.log_info(f"[omnicool.webapp] ws=ws://{self._ws_host}:{self._ws_port}")
         carb.log_info(f"[omnicool.webapp] webrtc enabled={self._webrtc_enabled} "
                       f"http://{self._webrtc_host}:{self._webrtc_port} "
-                      f"captureMode={self._capture_mode}")
+                      f"captureMode={self._capture_mode} "
+                      f"streamResolution={self._capture_width}x{self._capture_height}")
 
         if self._auto:
             self._start_http()
@@ -692,6 +695,11 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                         self._capture_display,
                         self._capture_window_title,
                     ),
+                    # Stream resolution: all frames (real + placeholder) are
+                    # normalised to this size to prevent mid-stream resolution
+                    # changes that cause codec glitches in browsers.
+                    stream_width=self._capture_width,
+                    stream_height=self._capture_height,
                 )
                 await self._webrtc_server.start(
                     host=self._webrtc_host, port=self._webrtc_port

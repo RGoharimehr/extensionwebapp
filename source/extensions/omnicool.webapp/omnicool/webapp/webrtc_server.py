@@ -77,19 +77,34 @@ try:
 
         ``frame_provider`` is an async callable that returns a numpy ndarray of
         shape ``(H, W, 3)`` or ``(H, W, 4)`` in uint8 RGB/RGBA order, or
-        ``None`` when no frame is available yet.  A black 1280×720 placeholder
-        frame is sent whenever the provider returns ``None`` so the
-        ``RTCPeerConnection`` stays alive while the renderer is warming up.
+        ``None`` when no frame is available yet.  A black placeholder frame at
+        ``stream_width`` × ``stream_height`` is sent whenever the provider
+        returns ``None`` so the ``RTCPeerConnection`` stays alive while the
+        renderer is warming up.
+
+        All frames — real or placeholder — are normalised to
+        ``(stream_height, stream_width)`` using ``av.VideoFrame.reformat()``
+        before being handed to the encoder.  This prevents mid-stream
+        resolution changes (e.g. a 1280×720 placeholder followed by a
+        1920×1080 viewport frame) which cause codec glitches or stream
+        failure in many browser/codec combinations.
 
         The caller (``extension.py``) supplies ``_capture_viewport_frame_async``
-        as the provider.
+        as the provider and the configured stream dimensions.
         """
 
         kind = "video"
 
-        def __init__(self, frame_provider: Optional[Callable] = None) -> None:
+        def __init__(
+            self,
+            frame_provider: Optional[Callable] = None,
+            stream_width: int = 1280,
+            stream_height: int = 720,
+        ) -> None:
             super().__init__()
             self._frame_provider = frame_provider
+            self._stream_width = stream_width
+            self._stream_height = stream_height
             self._blank: Optional[Any] = None  # lazily-created black numpy array
 
         async def recv(self):  # -> av.VideoFrame
@@ -122,8 +137,21 @@ try:
             else:
                 # Placeholder: a black frame keeps the stream alive
                 if self._blank is None:
-                    self._blank = np.zeros((720, 1280, 3), dtype=np.uint8)
+                    self._blank = np.zeros(
+                        (self._stream_height, self._stream_width, 3), dtype=np.uint8
+                    )
                 frame = av.VideoFrame.from_ndarray(self._blank, format="rgb24")
+
+            # Normalise every frame to the configured stream resolution.
+            # This prevents mid-stream resolution changes (e.g. placeholder
+            # 1280×720 → real 1920×1080) that cause codec glitches or stream
+            # failure in browser WebRTC implementations.
+            if frame.width != self._stream_width or frame.height != self._stream_height:
+                frame = frame.reformat(
+                    width=self._stream_width,
+                    height=self._stream_height,
+                    format="rgb24",
+                )
 
             frame.pts = pts
             frame.time_base = time_base
@@ -231,15 +259,27 @@ class WebRTCSignalingServer:
     ``RTCPeerConnection`` before the SDP answer is created.  The browser
     peer must include a ``recvonly`` video transceiver in its offer for the
     video m-line to be negotiated.
+
+    ``stream_width`` and ``stream_height`` control the resolution at which
+    all frames are delivered to the encoder.  Every frame — real or
+    placeholder — is normalised to this size with
+    :py:meth:`av.VideoFrame.reformat` so the encoder never receives a
+    mid-stream resolution change.  These values must match
+    ``renderer.resolution.width`` / ``renderer.resolution.height`` in the
+    app ``.kit`` file.
     """
 
     def __init__(
         self,
         message_handler: MessageHandler,
         video_frame_provider: Optional[Callable] = None,
+        stream_width: int = 1280,
+        stream_height: int = 720,
     ) -> None:
         self._message_handler = message_handler
         self._video_frame_provider = video_frame_provider
+        self._stream_width = stream_width
+        self._stream_height = stream_height
         self._sessions: Set[_PeerSession] = set()
         self._runner = None
         self._site = None
@@ -327,7 +367,11 @@ class WebRTCSignalingServer:
         # If the browser offer contains no video transceiver the track is
         # silently ignored during SDP negotiation.
         if OmniViewportVideoTrack is not None and self._video_frame_provider is not None:
-            pc.addTrack(OmniViewportVideoTrack(frame_provider=self._video_frame_provider))
+            pc.addTrack(OmniViewportVideoTrack(
+                frame_provider=self._video_frame_provider,
+                stream_width=self._stream_width,
+                stream_height=self._stream_height,
+            ))
             log.debug("[webrtc] viewport video track added to peer connection")
 
         answer = await pc.createAnswer()

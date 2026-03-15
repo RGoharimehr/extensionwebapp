@@ -58,6 +58,15 @@ exts."omnicool.webapp".captureMode = "viewport"
 exts."omnicool.webapp".captureDisplay = 1
 exts."omnicool.webapp".captureWindowTitle = ""
 
+# Stream resolution for the WebRTC video track.
+# All captured frames (real or placeholder) are normalised to this size so
+# the encoder never receives a mid-stream resolution change, which would
+# cause codec glitches or stream failure.
+# Must match renderer.resolution.width / renderer.resolution.height set in
+# the app .kit file (my_company.my_editor.kit).
+exts."omnicool.webapp".captureWidth = 1280
+exts."omnicool.webapp".captureHeight = 720
+
 
 [[python.module]]  # Main python module this extension provides, it will be publicly available as "import omnicool.webapp"
 name = "omnicool.webapp"
