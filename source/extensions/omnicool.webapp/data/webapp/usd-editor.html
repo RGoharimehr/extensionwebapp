@@ -451,10 +451,11 @@
   }
 
   async function _triggerPrimInspect(cx, cy) {
-    const normX = cx / window.innerWidth;
-    const normY = cy / window.innerHeight;
+    // Pick is based on the current Omniverse USD selection, not cursor
+    // coordinates.  The user selects a prim in the Kit viewport and then
+    // triggers the gesture — the server reads the active selection.
     try {
-      const data = await send('usd.get_prim_info', { x: normX, y: normY, maxAttrs: 10 });
+      const data = await send('usd.get_prim_info', { maxAttrs: 10 });
       _showPrimHud(cx, cy, data.primPath, data.attrs || []);
     } catch (e) {
       toast('Inspect failed: ' + e.message, true);

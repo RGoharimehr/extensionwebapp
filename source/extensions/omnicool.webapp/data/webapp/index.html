@@ -238,9 +238,10 @@
 
       /* ── Fetch + show ──────────────────────────────────────────── */
       function _inspect(cx, cy) {
-        var nx = cx / window.innerWidth;
-        var ny = cy / window.innerHeight;
-        _send('usd.get_prim_info', { x: nx, y: ny, maxAttrs: MAX_ATTRS })
+        // Pick is based on the current Omniverse USD selection, not cursor
+        // coordinates.  The user selects a prim in the Kit viewport and then
+        // triggers the gesture — the server reads the active selection.
+        _send('usd.get_prim_info', { maxAttrs: MAX_ATTRS })
           .then(function (data) { _showHud(cx, cy, data.primPath, data.attrs || []); })
           .catch(function (err) { _showHud(cx, cy, null, [], err.message); });
       }
