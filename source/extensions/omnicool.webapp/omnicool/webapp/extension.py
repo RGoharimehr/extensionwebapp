@@ -9,7 +9,6 @@ from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 import omni.ext
 import omni.kit.app
 import carb
-import omni.kit.viewport.utility as vp_utils
 import omni.usd
 from pxr import UsdGeom, Sdf, Gf
 
@@ -174,59 +173,22 @@ def _get_xform(stage, prim_path: str):
 
 
 
-def _pick_prim_path(norm_x: float, norm_y: float) -> str:
+def _pick_prim_path(norm_x: float = 0.0, norm_y: float = 0.0) -> str:
     """
-    Pick a prim in the active viewport using normalized coordinates [0..1].
+    Return the prim path that the user currently has selected in the
+    Omniverse viewport.
 
-    Selection is tried first because the primary user workflow is:
-    "select a prim in the Kit viewport, then trigger the HUD gesture from the
-    browser".  Reading the active selection is the most reliable way to
-    identify the user's intended prim regardless of whether browser cursor
-    coordinates align with Kit's viewport coordinate space.
+    The ``norm_x`` / ``norm_y`` parameters are accepted for API compatibility
+    but are intentionally ignored: the reliable and correct way to identify
+    which prim the user wants to inspect is to read the active USD selection,
+    not to try to map browser cursor coordinates onto a Kit window.  Cursor
+    mapping is unreliable whenever the webapp and Kit run at different
+    resolutions or on different screens.
 
-    When the selection is empty (e.g. the user triggered the gesture without
-    pre-selecting anything) hardware raycast picking is attempted via
-    omni.kit.raycast.query so that pointing at a prim in the WebRTC video
-    still works.
-
-    Returns the prim path string or "" if nothing is found.
+    Returns the first selected prim path string, or "" if nothing is selected.
     """
-    # 1. Prefer the active USD selection — the user's explicit intent.
     paths = _get_selection_paths()
-    if paths:
-        return paths[0]
-
-    # 2. Fallback: hardware raycast when nothing is selected.
-    try:
-        vp = vp_utils.get_active_viewport_window()
-        if vp is not None:
-            try:
-                w, h = vp.get_texture_resolution()
-            except Exception:
-                w, h = 0, 0
-            if w and h:
-                px = int(norm_x * w)
-                # y from top -> bottom-origin for Kit's picking API
-                py_flipped = int((1.0 - norm_y) * h)
-                import importlib
-                for api in ("omni.kit.raycast.query",):
-                    try:
-                        mod = importlib.import_module(api)
-                        pick_fn = getattr(mod, "pick_prim", None)
-                        if pick_fn is not None:
-                            hit = pick_fn(px, py_flipped)
-                            if hit and getattr(hit, "prim_path", None):
-                                return str(hit.prim_path)
-                            # Also try top-origin coords in case API differs
-                            hit = pick_fn(px, int(norm_y * h))
-                            if hit and getattr(hit, "prim_path", None):
-                                return str(hit.prim_path)
-                    except Exception:
-                        pass
-    except Exception as e:
-        carb.log_warn(f"[omnicool.webapp][pick] viewport pick failed: {e}")
-
-    return ""
+    return paths[0] if paths else ""
 
 def _json_safe(value):
     # Convert common USD / pxr types into JSON-serializable values
