@@ -41,31 +41,9 @@ exts."omnicool.webapp".wsPort = 8899
 # Browsers post their SDP offer to http://<webrtcHost>:<webrtcPort>/webrtc/offer
 # and receive an SDP answer; the resulting RTCDataChannel uses the same
 # JSON message protocol as the WebSocket USD bridge.
-exts."omnicool.webapp".webrtcEnabled = true
+exts."omnicool.webapp".webrtcEnabled = false
 exts."omnicool.webapp".webrtcHost = "127.0.0.1"
 exts."omnicool.webapp".webrtcPort = 8900
-
-# Video capture mode for the WebRTC live viewport stream.
-# "viewport" (default) — Omniverse renderer via omni.renderer.capture.
-# "desktop"            — full monitor capture via mss (cross-platform).
-#                        captureDisplay selects the monitor: 1 = first
-#                        physical monitor, 0 = all monitors merged.
-# "window"             — capture a specific window by title substring;
-#                        set captureWindowTitle to a partial window title
-#                        (e.g. "Omniverse" or "Chrome").  Falls back to
-#                        desktop capture when the window is not found.
-exts."omnicool.webapp".captureMode = "viewport"
-exts."omnicool.webapp".captureDisplay = 1
-exts."omnicool.webapp".captureWindowTitle = ""
-
-# Stream resolution for the WebRTC video track.
-# All captured frames (real or placeholder) are normalised to this size so
-# the encoder never receives a mid-stream resolution change, which would
-# cause codec glitches or stream failure.
-# Must match renderer.resolution.width / renderer.resolution.height set in
-# the app .kit file (my_company.my_editor.kit).
-exts."omnicool.webapp".captureWidth = 1280
-exts."omnicool.webapp".captureHeight = 720
 
 
 [[python.module]]  # Main python module this extension provides, it will be publicly available as "import omnicool.webapp"

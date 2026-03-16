@@ -9,6 +9,7 @@ from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 import omni.ext
 import omni.kit.app
 import carb
+import omni.kit.viewport.utility as vp_utils
 import omni.usd
 from pxr import UsdGeom, Sdf, Gf
 
@@ -173,20 +174,49 @@ def _get_xform(stage, prim_path: str):
 
 
 
-def _pick_prim_path(norm_x: float = 0.0, norm_y: float = 0.0) -> str:
+def _pick_prim_path(norm_x: float, norm_y: float) -> str:
     """
-    Return the prim path that the user currently has selected in the
-    Omniverse viewport.
+    Pick a prim in the active viewport using normalized coordinates [0..1].
 
-    The ``norm_x`` / ``norm_y`` parameters are accepted for API compatibility
-    but are intentionally ignored: the reliable and correct way to identify
-    which prim the user wants to inspect is to read the active USD selection,
-    not to try to map browser cursor coordinates onto a Kit window.  Cursor
-    mapping is unreliable whenever the webapp and Kit run at different
-    resolutions or on different screens.
+    Tries hardware raycast picking via omni.kit.raycast.query when the viewport
+    is available.  Falls back to returning the first currently-selected prim so
+    the workflow "select a prim, then hold I + click to inspect it" always works
+    even when GPU picking is unavailable (e.g., headless or viewer mode).
 
-    Returns the first selected prim path string, or "" if nothing is selected.
+    Returns the prim path string or "" if nothing is found.
     """
+    try:
+        vp = vp_utils.get_active_viewport_window()
+        if vp is not None:
+            try:
+                w, h = vp.get_texture_resolution()
+            except Exception:
+                w, h = 0, 0
+            if w and h:
+                px = int(norm_x * w)
+                # y from top -> bottom-origin for Kit's picking API
+                py_flipped = int((1.0 - norm_y) * h)
+                import importlib
+                for api in ("omni.kit.raycast.query",):
+                    try:
+                        mod = importlib.import_module(api)
+                        pick_fn = getattr(mod, "pick_prim", None)
+                        if pick_fn is not None:
+                            hit = pick_fn(px, py_flipped)
+                            if hit and getattr(hit, "prim_path", None):
+                                return str(hit.prim_path)
+                            # Also try top-origin coords in case API differs
+                            hit = pick_fn(px, int(norm_y * h))
+                            if hit and getattr(hit, "prim_path", None):
+                                return str(hit.prim_path)
+                    except Exception:
+                        pass
+    except Exception as e:
+        carb.log_warn(f"[omnicool.webapp][pick] viewport pick failed: {e}")
+
+    # Reliable fallback: return the first currently selected prim.
+    # The documented user workflow is to select a prim first and then
+    # trigger the HUD gesture, so this covers the common case.
     paths = _get_selection_paths()
     return paths[0] if paths else ""
 
@@ -210,251 +240,6 @@ def _json_safe(value):
         pass
 
     return str(value)
-
-
-# -----------------------------
-# Viewport frame capture (WebRTC video source)
-# -----------------------------
-
-_capture_busy = False  # guard against re-entrant captures
-
-
-async def _capture_viewport_frame_async():
-    """
-    Capture the current swapchain frame as an RGB numpy array.
-
-    Schedules a GPU-side screenshot via ``omni.renderer.capture`` on the next
-    render tick.  The render-thread callback resolves an asyncio ``Future``
-    using ``loop.call_soon_threadsafe`` so the await is non-blocking.
-
-    Returns an ``(H, W, 3)`` uint8 numpy array, or ``None`` if the capture
-    timed out or failed (e.g. during startup before the first frame renders,
-    or in headless mode without a renderer).
-
-    A busy-flag prevents a queue of pending captures from building up when the
-    renderer is slower than the WebRTC frame rate.
-    """
-    global _capture_busy
-    if _capture_busy:
-        return None
-    _capture_busy = True
-    try:
-        import numpy as np
-        import omni.renderer.capture as rc
-
-        loop = asyncio.get_running_loop()
-        fut: asyncio.Future = loop.create_future()
-
-        def _on_capture(buf, buf_size, width, height, format_enum):
-            if fut.done():
-                return
-            try:
-                arr = np.frombuffer(buf, dtype=np.uint8).copy()
-                # Omniverse swapchain is BGRA; rearrange channels to RGB for
-                # aiortc which encodes frames as rgb24.
-                arr = arr[: width * height * 4].reshape(height, width, 4)[:, :, [2, 1, 0]]
-                loop.call_soon_threadsafe(fut.set_result, arr)
-            except Exception as exc:
-                loop.call_soon_threadsafe(fut.set_exception, exc)
-
-        iface = rc.acquire_renderer_capture_interface()
-        iface.capture_next_frame_swapchain_async(_on_capture)
-        return await asyncio.wait_for(fut, timeout=1.0)
-    except asyncio.TimeoutError:
-        carb.log_warn("[omnicool.webapp][webrtc] viewport capture timed out — sending placeholder frame")
-        return None
-    except Exception as exc:
-        carb.log_warn(f"[omnicool.webapp][webrtc] viewport capture failed: {exc}")
-        return None
-    finally:
-        _capture_busy = False
-
-
-# -----------------------------
-# Desktop / window frame capture (WebRTC fallback for non-Kit environments)
-# -----------------------------
-
-def _get_window_region(title: str):
-    """
-    Return an mss-style region dict ``{top, left, width, height}`` for the
-    first window whose title contains *title* (case-insensitive), or ``None``
-    if the window cannot be located.
-
-    Platform support:
-    - Windows — ``win32gui`` (pywin32)
-    - Linux   — ``xdotool`` CLI utility
-    - macOS   — ``osascript`` / AppleScript (requires Accessibility permission)
-    """
-    if not title:
-        return None
-
-    import sys
-
-    if sys.platform == "win32":
-        try:
-            import win32gui  # pywin32
-            matches: list = []
-
-            def _cb(hwnd, _):
-                if win32gui.IsWindowVisible(hwnd) and title.lower() in win32gui.GetWindowText(hwnd).lower():
-                    matches.append(hwnd)
-
-            win32gui.EnumWindows(_cb, None)
-            if matches:
-                x1, y1, x2, y2 = win32gui.GetWindowRect(matches[0])
-                return {
-                    "top": y1, "left": x1,
-                    "width": max(x2 - x1, 1), "height": max(y2 - y1, 1),
-                }
-        except Exception:
-            pass
-
-    elif sys.platform.startswith("linux"):
-        try:
-            import subprocess
-            res = subprocess.run(
-                ["xdotool", "search", "--name", title],
-                capture_output=True, text=True, timeout=3,
-            )
-            if res.returncode == 0 and res.stdout.strip():
-                wid = res.stdout.strip().split()[0]
-                geo = subprocess.run(
-                    ["xdotool", "getwindowgeometry", "--shell", wid],
-                    capture_output=True, text=True, timeout=3,
-                )
-                if geo.returncode == 0:
-                    props = dict(
-                        line.split("=", 1)
-                        for line in geo.stdout.splitlines()
-                        if "=" in line
-                    )
-                    return {
-                        "top":    int(props.get("Y", 0)),
-                        "left":   int(props.get("X", 0)),
-                        "width":  max(int(props.get("WIDTH", 1920)), 1),
-                        "height": max(int(props.get("HEIGHT", 1080)), 1),
-                    }
-        except Exception:
-            pass
-
-    elif sys.platform == "darwin":
-        try:
-            import subprocess
-            script = (
-                'tell application "System Events"\n'
-                f'  set w to first window of (first process whose name contains "{title}")\n'
-                '  set p to position of w\n'
-                '  set s to size of w\n'
-                '  return (item 1 of p) & "," & (item 2 of p) & "," & (item 1 of s) & "," & (item 2 of s)\n'
-                'end tell'
-            )
-            res = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=5,
-            )
-            if res.returncode == 0:
-                parts = [int(x.strip()) for x in res.stdout.strip().split(",")]
-                if len(parts) == 4:
-                    return {
-                        "top": parts[1], "left": parts[0],
-                        "width": max(parts[2], 1), "height": max(parts[3], 1),
-                    }
-        except Exception:
-            pass
-
-    return None
-
-
-def _grab_region_rgb(region: dict):
-    """
-    Synchronous helper: grab *region* (an mss-compatible dict with keys
-    ``top``, ``left``, ``width``, ``height``) and return an ``(H, W, 3)``
-    uint8 RGB numpy array.
-    """
-    import mss
-    import numpy as np
-
-    with mss.mss() as sct:
-        img = sct.grab(region)
-        arr = np.frombuffer(img.bgra, dtype=np.uint8).reshape(img.height, img.width, 4)
-        return arr[:, :, [2, 1, 0]]  # BGRA → RGB
-
-
-async def _capture_desktop_frame_async(display_idx: int = 1):
-    """
-    Capture a full monitor as an ``(H, W, 3)`` uint8 RGB numpy array using
-    ``mss``.
-
-    *display_idx* is a 1-based index into the list of monitors that ``mss``
-    reports (``0`` = all monitors merged into one virtual desktop; ``1`` = the
-    first physical monitor).  If the index is out of range it falls back to the
-    first monitor.
-
-    Returns ``None`` if ``mss`` is not installed, ``$DISPLAY`` is absent (Linux
-    headless), or any other capture error occurs.
-    """
-    loop = asyncio.get_running_loop()
-
-    def _grab():
-        import mss
-        import numpy as np
-        with mss.mss() as sct:
-            monitors = sct.monitors
-            idx = display_idx if 0 <= display_idx < len(monitors) else min(1, len(monitors) - 1)
-            img = sct.grab(monitors[idx])
-            arr = np.frombuffer(img.bgra, dtype=np.uint8).reshape(img.height, img.width, 4)
-            return arr[:, :, [2, 1, 0]]  # BGRA → RGB
-
-    try:
-        return await loop.run_in_executor(None, _grab)
-    except Exception as exc:
-        carb.log_warn(f"[omnicool.webapp][webrtc] desktop capture failed: {exc}")
-        return None
-
-
-async def _capture_window_frame_async(window_title: str, display_idx: int = 1):
-    """
-    Capture the first window whose title contains *window_title* as an RGB
-    array.
-
-    The window coordinates are resolved in a thread-pool worker (because the
-    platform helpers may shell out to ``xdotool`` or ``osascript``).  If the
-    window cannot be found the call falls back to a full-monitor desktop
-    capture using ``display_idx``.
-
-    Returns ``None`` only if both window and desktop capture fail.
-    """
-    loop = asyncio.get_running_loop()
-    region = await loop.run_in_executor(None, _get_window_region, window_title)
-    if region is not None:
-        try:
-            return await loop.run_in_executor(None, _grab_region_rgb, region)
-        except Exception as exc:
-            carb.log_warn(f"[omnicool.webapp][webrtc] window capture failed: {exc}")
-    # Fall back to full monitor
-    return await _capture_desktop_frame_async(display_idx)
-
-
-def _get_capture_fn(mode: str, display_idx: int, window_title: str):
-    """
-    Return an async frame-capture coroutine function for the given *mode*.
-
-    mode="viewport"  (default) — ``omni.renderer.capture`` (Kit renderer)
-    mode="desktop"             — ``mss`` full-monitor capture
-    mode="window"              — ``mss`` window-by-title capture (falls back to desktop)
-    """
-    if mode == "desktop":
-        async def _desktop():
-            return await _capture_desktop_frame_async(display_idx)
-        return _desktop
-
-    if mode == "window":
-        async def _window():
-            return await _capture_window_frame_async(window_title, display_idx)
-        return _window
-
-    # "viewport" or unknown — Omniverse renderer
-    return _capture_viewport_frame_async
 
 
 # -----------------------------
@@ -519,12 +304,6 @@ class OmnicoolWebAppExt(omni.ext.IExt):
         self._webrtc_host = str(settings.get(f"{base}/webrtcHost") or "127.0.0.1")
         self._webrtc_port = int(settings.get(f"{base}/webrtcPort") or 8900)
 
-        self._capture_mode = str(settings.get(f"{base}/captureMode") or "viewport")
-        self._capture_display = int(settings.get(f"{base}/captureDisplay") or 1)
-        self._capture_window_title = str(settings.get(f"{base}/captureWindowTitle") or "")
-        self._capture_width = int(settings.get(f"{base}/captureWidth") or 1280)
-        self._capture_height = int(settings.get(f"{base}/captureHeight") or 720)
-
         mgr = omni.kit.app.get_app().get_extension_manager()
         ext_path = mgr.get_extension_path(ext_id)
         self._web_root = os.path.join(ext_path, self._web_root_rel)
@@ -533,9 +312,7 @@ class OmnicoolWebAppExt(omni.ext.IExt):
         carb.log_info(f"[omnicool.webapp] http=http://{self._host}:{self._port}")
         carb.log_info(f"[omnicool.webapp] ws=ws://{self._ws_host}:{self._ws_port}")
         carb.log_info(f"[omnicool.webapp] webrtc enabled={self._webrtc_enabled} "
-                      f"http://{self._webrtc_host}:{self._webrtc_port} "
-                      f"captureMode={self._capture_mode} "
-                      f"streamResolution={self._capture_width}x{self._capture_height}")
+                      f"http://{self._webrtc_host}:{self._webrtc_port}")
 
         if self._auto:
             self._start_http()
@@ -656,20 +433,7 @@ class OmnicoolWebAppExt(omni.ext.IExt):
         async def _run():
             try:
                 self._webrtc_server = WebRTCSignalingServer(
-                    message_handler=self._handle_ws_message,
-                    # Select the capture source according to the captureMode
-                    # setting: "viewport" (Omniverse renderer), "desktop"
-                    # (full monitor via mss), or "window" (mss + window title).
-                    video_frame_provider=_get_capture_fn(
-                        self._capture_mode,
-                        self._capture_display,
-                        self._capture_window_title,
-                    ),
-                    # Stream resolution: all frames (real + placeholder) are
-                    # normalised to this size to prevent mid-stream resolution
-                    # changes that cause codec glitches in browsers.
-                    stream_width=self._capture_width,
-                    stream_height=self._capture_height,
+                    message_handler=self._handle_ws_message
                 )
                 await self._webrtc_server.start(
                     host=self._webrtc_host, port=self._webrtc_port

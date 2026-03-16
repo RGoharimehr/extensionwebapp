@@ -42,7 +42,3 @@ deps/**/user.toml
 !/source/extensions/
 !/source/extensions/omnicool.webapp/
 !/source/extensions/omnicool.webapp/**
-# Exclude compiled Python bytecode even inside the tracked extension tree
-source/extensions/omnicool.webapp/**/__pycache__/
-source/extensions/omnicool.webapp/**/*.pyc
-source/extensions/omnicool.webapp/**/*.pyo

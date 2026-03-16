@@ -62,106 +62,6 @@ MessageHandler = Callable[[str], Awaitable[dict]]
 
 
 # ---------------------------------------------------------------------------
-# Optional: viewport video track
-# ---------------------------------------------------------------------------
-
-try:
-    # aiortc ships VideoStreamTrack; av (PyAV) ships VideoFrame.
-    # Both are installed as dependencies of aiortc, so if aiortc is present
-    # then both are available.
-    from aiortc.mediastreams import VideoStreamTrack as _VideoStreamTrack  # noqa: F401
-
-    class OmniViewportVideoTrack(_VideoStreamTrack):
-        """
-        A WebRTC video track that streams frames from the Omniverse viewport.
-
-        ``frame_provider`` is an async callable that returns a numpy ndarray of
-        shape ``(H, W, 3)`` or ``(H, W, 4)`` in uint8 RGB/RGBA order, or
-        ``None`` when no frame is available yet.  A black placeholder frame at
-        ``stream_width`` × ``stream_height`` is sent whenever the provider
-        returns ``None`` so the ``RTCPeerConnection`` stays alive while the
-        renderer is warming up.
-
-        All frames — real or placeholder — are normalised to
-        ``(stream_height, stream_width)`` using ``av.VideoFrame.reformat()``
-        before being handed to the encoder.  This prevents mid-stream
-        resolution changes (e.g. a 1280×720 placeholder followed by a
-        1920×1080 viewport frame) which cause codec glitches or stream
-        failure in many browser/codec combinations.
-
-        The caller (``extension.py``) supplies ``_capture_viewport_frame_async``
-        as the provider and the configured stream dimensions.
-        """
-
-        kind = "video"
-
-        def __init__(
-            self,
-            frame_provider: Optional[Callable] = None,
-            stream_width: int = 1280,
-            stream_height: int = 720,
-        ) -> None:
-            super().__init__()
-            self._frame_provider = frame_provider
-            self._stream_width = stream_width
-            self._stream_height = stream_height
-            self._blank: Optional[Any] = None  # lazily-created black numpy array
-
-        async def recv(self):  # -> av.VideoFrame
-            import av
-            import numpy as np
-
-            pts, time_base = await self.next_timestamp()
-
-            arr: Optional[Any] = None
-            if self._frame_provider is not None:
-                try:
-                    # Await the provider directly — _capture_viewport_frame_async
-                    # already enforces its own 1-second timeout internally, so an
-                    # extra outer wait_for is unnecessary and counterproductive
-                    # (a 0.4 s outer deadline would race and cancel the inner
-                    # coroutine before the render thread has a chance to deliver
-                    # the frame, resulting in permanent black/blank output).
-                    arr = await self._frame_provider()
-                except Exception:
-                    arr = None
-
-            if arr is not None:
-                # Handle both 3-channel (RGB) and 4-channel (BGRA) arrays.
-                # Kit's swapchain capture returns BGRA; rearrange to RGB for
-                # the aiortc encoder.  A plain 3-channel array from a test
-                # provider is passed through untouched.
-                if arr.ndim == 3 and arr.shape[2] == 4:
-                    arr = arr[:, :, [2, 1, 0]]  # BGRA → RGB
-                frame = av.VideoFrame.from_ndarray(arr, format="rgb24")
-            else:
-                # Placeholder: a black frame keeps the stream alive
-                if self._blank is None:
-                    self._blank = np.zeros(
-                        (self._stream_height, self._stream_width, 3), dtype=np.uint8
-                    )
-                frame = av.VideoFrame.from_ndarray(self._blank, format="rgb24")
-
-            # Normalise every frame to the configured stream resolution.
-            # This prevents mid-stream resolution changes (e.g. placeholder
-            # 1280×720 → real 1920×1080) that cause codec glitches or stream
-            # failure in browser WebRTC implementations.
-            if frame.width != self._stream_width or frame.height != self._stream_height:
-                frame = frame.reformat(
-                    width=self._stream_width,
-                    height=self._stream_height,
-                    format="rgb24",
-                )
-
-            frame.pts = pts
-            frame.time_base = time_base
-            return frame
-
-except ImportError:
-    OmniViewportVideoTrack = None  # type: ignore[misc,assignment]
-
-
-# ---------------------------------------------------------------------------
 # Dependency helpers
 # ---------------------------------------------------------------------------
 
@@ -247,39 +147,13 @@ class WebRTCSignalingServer:
 
     Lifecycle
     ---------
-    1. Caller provides a ``message_handler`` coroutine and, optionally, a
-       ``video_frame_provider`` coroutine that returns viewport frames.
+    1. Caller provides a ``message_handler`` coroutine.
     2. Call ``start(host, port)``  to begin serving.
     3. Call ``stop()``             to shut down cleanly.
-
-    Video streaming
-    ---------------
-    When ``video_frame_provider`` is supplied and aiortc is installed, an
-    :class:`OmniViewportVideoTrack` is added to every new
-    ``RTCPeerConnection`` before the SDP answer is created.  The browser
-    peer must include a ``recvonly`` video transceiver in its offer for the
-    video m-line to be negotiated.
-
-    ``stream_width`` and ``stream_height`` control the resolution at which
-    all frames are delivered to the encoder.  Every frame — real or
-    placeholder — is normalised to this size with
-    :py:meth:`av.VideoFrame.reformat` so the encoder never receives a
-    mid-stream resolution change.  These values must match
-    ``renderer.resolution.width`` / ``renderer.resolution.height`` in the
-    app ``.kit`` file.
     """
 
-    def __init__(
-        self,
-        message_handler: MessageHandler,
-        video_frame_provider: Optional[Callable] = None,
-        stream_width: int = 1280,
-        stream_height: int = 720,
-    ) -> None:
+    def __init__(self, message_handler: MessageHandler):
         self._message_handler = message_handler
-        self._video_frame_provider = video_frame_provider
-        self._stream_width = stream_width
-        self._stream_height = stream_height
         self._sessions: Set[_PeerSession] = set()
         self._runner = None
         self._site = None
@@ -302,7 +176,6 @@ class WebRTCSignalingServer:
 
         app = web.Application()
         app.router.add_post("/webrtc/offer", self._handle_offer)
-        app.router.add_route("OPTIONS", "/webrtc/offer", self._handle_options)
         app.router.add_get("/webrtc/status", self._handle_status)
 
         self._runner = web.AppRunner(app)
@@ -359,32 +232,8 @@ class WebRTCSignalingServer:
 
         offer = RTCSessionDescription(sdp=sdp, type=sdp_type)
         await pc.setRemoteDescription(offer)
-
-        # Add a viewport video track so the browser <video> element receives
-        # the Omniverse renderer output.  The track must be added AFTER
-        # setRemoteDescription (so we know what the offer contains) and BEFORE
-        # createAnswer() so the SDP answer advertises the video m-line.
-        # If the browser offer contains no video transceiver the track is
-        # silently ignored during SDP negotiation.
-        if OmniViewportVideoTrack is not None and self._video_frame_provider is not None:
-            pc.addTrack(OmniViewportVideoTrack(
-                frame_provider=self._video_frame_provider,
-                stream_width=self._stream_width,
-                stream_height=self._stream_height,
-            ))
-            log.debug("[webrtc] viewport video track added to peer connection")
-
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
-
-        # Safety: wait until ICE gathering is complete before reading
-        # localDescription.sdp.  aiortc ≥ 1.3 awaits gathering inside
-        # setLocalDescription, but older builds return before it finishes.
-        # Polling avoids a hard dependency on a specific aiortc version.
-        _loop = asyncio.get_running_loop()
-        _deadline = _loop.time() + 5.0
-        while pc.iceGatheringState != "complete" and _loop.time() < _deadline:
-            await asyncio.sleep(0.05)
 
         return web.json_response(
             {
@@ -392,24 +241,6 @@ class WebRTCSignalingServer:
                 "type": pc.localDescription.type,
             },
             headers={"Access-Control-Allow-Origin": "*"},
-        )
-
-    async def _handle_options(self, request) -> Any:
-        """
-        OPTIONS /webrtc/offer
-        Respond to the browser CORS preflight so cross-origin ``fetch()``
-        calls (e.g., from http://localhost:3001 to http://localhost:8900)
-        are allowed without a browser security error.
-        """
-        import aiohttp.web as web
-
-        return web.Response(
-            status=200,
-            headers={
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "POST, OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type",
-            },
         )
 
     async def _handle_status(self, request) -> Any:
