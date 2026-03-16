@@ -5,10 +5,239 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Omnicool</title>
     <link href="/static/css/main.12efbfe1.css" rel="stylesheet">
+    <!-- ════════════════════════════════════════════════════════════════
+         OMNICOOL CONFIGURATION — edit this block to customise the app.
+         All settings have safe defaults if omitted.
+         ════════════════════════════════════════════════════════════════ -->
+    <script>
+    window.OMNICOOL_CONFIG = {
+      /* USD attribute that identifies a tracked component (prim-inspect HUD). */
+      trackedAttr: "flownex:componentName",
+
+      /* Fallback prim path used in standalone / demo mode (no Omniverse). */
+      stubPrimPath: "/World/DataCenter/Rack_A/Pump_01",
+
+      /* WebSocket endpoint of the Omniverse extension bridge.             */
+      wsUrl: "ws://127.0.0.1:8899",
+
+      /* How long the mouse must be held (ms) to trigger prim inspect.    */
+      holdMs: 1000,
+
+      /* Maximum number of USD attributes shown in the inspect HUD.       */
+      maxAttrs: 10
+    };
+    </script>
+    <style>
+      /* ── I-key inspect mode ─────────────────────────────────────── */
+      body.omni-i-mode, body.omni-i-mode * { cursor: crosshair !important; }
+      #omniIKeyHint {
+        position: fixed; bottom: 0; left: 0; right: 0;
+        background: rgba(233,69,96,.88); color: #fff;
+        text-align: center; padding: 6px 12px;
+        font-size: 12px; font-weight: 500; font-family: 'Segoe UI', system-ui, sans-serif;
+        display: none; z-index: 100000; pointer-events: none;
+      }
+      body.omni-i-mode #omniIKeyHint { display: block; }
+      #omniIKeyHint.omni-armed { background: rgba(83,52,131,.92); }
+      /* ── Prim info HUD ──────────────────────────────────────────── */
+      #omniPrimHud {
+        position: fixed;
+        background: #16213e; border: 1px solid #e94560;
+        border-radius: 7px; padding: 11px 15px 9px;
+        min-width: 240px; max-width: 380px;
+        box-shadow: 0 6px 24px rgba(0,0,0,.6);
+        z-index: 100001; display: none;
+        font-family: 'Segoe UI', system-ui, sans-serif;
+        color: #eee;
+      }
+      .omni-hud-path { font-family: monospace; color: #e94560; font-size: 13px; font-weight: 600; margin-bottom: 7px; word-break: break-all; }
+      .omni-hud-tbl { width: 100%; border-collapse: collapse; font-size: 11px; }
+      .omni-hud-tbl td { padding: 2px 8px 2px 0; vertical-align: top; }
+      .omni-hud-attr-name { color: #64b5f6; font-family: monospace; white-space: nowrap; }
+      .omni-hud-attr-val  { color: #eee; font-family: monospace; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .omni-hud-empty { font-size: 11px; color: #aaa; margin-bottom: 4px; }
+      .omni-hud-hint  { font-size: 10px; color: #aaa; margin-top: 7px; padding-top: 5px; border-top: 1px solid #2a2a4a; }
+      .omni-hud-btn {
+        cursor: pointer; border: none; border-radius: 4px;
+        padding: 4px 10px; font-size: 11px; font-weight: 500;
+        background: #e94560; color: #fff; margin-top: 6px;
+      }
+      .omni-hud-btn:hover { opacity: .82; }
+    </style>
   </head>
   <body>
     <noscript>You need to enable JavaScript to run this app.</noscript>
     <div id="root"></div>
+
+    <!-- Prim-inspect overlay: hold I + mouse-hold 1 s anywhere in the app -->
+    <div id="omniIKeyHint">🔍 Inspect mode — hold the mouse button for 1 second to read prim attributes</div>
+    <div id="omniPrimHud"></div>
+
     <script src="/static/js/main.eb06dcd7.js"></script>
+    <script>
+    /* ── Prim-inspect HUD — self-contained, namespaced, non-breaking ── */
+    (function () {
+      'use strict';
+
+      var _cfg      = window.OMNICOOL_CONFIG || {};
+      var WS_URL    = _cfg.wsUrl    || 'ws://127.0.0.1:8899';
+      var HOLD_MS   = _cfg.holdMs   || 1000;
+      var MAX_ATTRS = _cfg.maxAttrs || 10;
+
+      var _ws        = null;
+      var _msgId     = 0;
+      var _pending   = {};
+      var _iActive   = false;
+      var _holdTimer = null;
+      var _reconnectTimer = null;
+
+      /* ── WebSocket ─────────────────────────────────────────────── */
+      function _connect() {
+        if (_ws && (_ws.readyState === WebSocket.CONNECTING || _ws.readyState === WebSocket.OPEN)) return;
+        try {
+          _ws = new WebSocket(WS_URL);
+          _ws.onmessage = function (evt) {
+            var msg; try { msg = JSON.parse(evt.data); } catch (e) { return; }
+            var cb = _pending[msg.id];
+            if (cb) { delete _pending[msg.id]; msg.ok ? cb.resolve(msg.payload) : cb.reject(new Error(msg.error || 'USD error')); }
+          };
+          _ws.onclose = _ws.onerror = function () {
+            _ws = null;
+            // Reconnect quietly in the background every 5 s
+            clearTimeout(_reconnectTimer);
+            _reconnectTimer = setTimeout(_connect, 5000);
+          };
+        } catch (e) { /* ignore — will retry */ }
+      }
+
+      function _send(type, payload) {
+        return new Promise(function (resolve, reject) {
+          if (!_ws || _ws.readyState !== WebSocket.OPEN) { reject(new Error('Not connected')); return; }
+          var id = String(++_msgId);
+          _pending[id] = { resolve: resolve, reject: reject };
+          _ws.send(JSON.stringify({ id: id, type: type, payload: payload }));
+          setTimeout(function () {
+            if (_pending[id]) { delete _pending[id]; reject(new Error('Timeout')); }
+          }, 10000);
+        });
+      }
+
+      /* ── Gesture ───────────────────────────────────────────────── */
+      document.addEventListener('keydown', function (e) {
+        if ((e.key === 'i' || e.key === 'I') && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          _iActive = true;
+          document.body.classList.add('omni-i-mode');
+        }
+      });
+
+      document.addEventListener('keyup', function (e) {
+        if (e.key === 'i' || e.key === 'I') {
+          _iActive = false;
+          document.body.classList.remove('omni-i-mode');
+          _cancelHold();
+        }
+      });
+
+      document.addEventListener('mousedown', function (e) {
+        if (!_iActive || !_ws || _ws.readyState !== WebSocket.OPEN) return;
+        var cx = e.clientX, cy = e.clientY;
+        document.getElementById('omniIKeyHint').classList.add('omni-armed');
+        _holdTimer = setTimeout(function () {
+          document.getElementById('omniIKeyHint').classList.remove('omni-armed');
+          _inspect(cx, cy);
+        }, HOLD_MS);
+      });
+
+      document.addEventListener('mouseup', function () {
+        document.getElementById('omniIKeyHint').classList.remove('omni-armed');
+        _cancelHold();
+      });
+
+      function _cancelHold() {
+        if (_holdTimer) { clearTimeout(_holdTimer); _holdTimer = null; }
+      }
+
+      /* ── Fetch + show ──────────────────────────────────────────── */
+      function _inspect(cx, cy) {
+        var nx = cx / window.innerWidth;
+        var ny = cy / window.innerHeight;
+        _send('usd.get_prim_info', { x: nx, y: ny, maxAttrs: MAX_ATTRS })
+          .then(function (data) { _showHud(cx, cy, data.primPath, data.attrs || []); })
+          .catch(function (err) { _showHud(cx, cy, null, [], err.message); });
+      }
+
+      function _esc(s) {
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+      }
+
+      function _fmt(v) {
+        if (v === null || v === undefined) return '—';
+        if (typeof v === 'object') return JSON.stringify(v);
+        return String(v);
+      }
+
+      function _showHud(cx, cy, primPath, attrs, errMsg) {
+        var hud = document.getElementById('omniPrimHud');
+        var html = '';
+
+        if (errMsg) {
+          html = '<div class="omni-hud-path" style="color:#f44336">Error</div>'
+               + '<div class="omni-hud-empty">' + _esc(errMsg) + '</div>';
+        } else if (!primPath) {
+          html = '<div class="omni-hud-path">No prim found at cursor</div>'
+               + '<div class="omni-hud-hint">Select a prim in the viewport first, then try again.</div>';
+        } else {
+          var rows = attrs.map(function (a) {
+            return '<tr><td class="omni-hud-attr-name">' + _esc(a.name) + '</td>'
+                 + '<td class="omni-hud-attr-val">' + _esc(_fmt(a.value)) + '</td></tr>';
+          }).join('');
+          html = '<div class="omni-hud-path">' + _esc(primPath) + '</div>'
+               + (rows ? '<table class="omni-hud-tbl"><tbody>' + rows + '</tbody></table>'
+                       : '<div class="omni-hud-empty">No attributes on this prim</div>')
+               + '<div class="omni-hud-hint">Press Esc or click outside to dismiss</div>'
+               + '<button class="omni-hud-btn" onclick="window.open(\'/usd-editor.html\',\'_blank\')">'
+               + 'Open in USD Editor ↗</button>';
+        }
+
+        hud.innerHTML = html;
+        hud.style.display = 'block';
+
+        // Position near the click, clamped to viewport
+        var pad = 14;
+        var left = cx + pad, top = cy + pad;
+        var rect = hud.getBoundingClientRect();
+        if (left + rect.width  > window.innerWidth)  left = cx - rect.width  - pad;
+        if (top  + rect.height > window.innerHeight) top  = cy - rect.height - pad;
+        hud.style.left = Math.max(0, left) + 'px';
+        hud.style.top  = Math.max(0, top)  + 'px';
+
+        // Dismiss listeners
+        var onKey = function (e) { if (e.key === 'Escape') _hideHud(); };
+        var onOut = function (e) { if (!hud.contains(e.target)) _hideHud(); };
+        setTimeout(function () {
+          document.addEventListener('keydown', onKey);
+          document.addEventListener('mousedown', onOut);
+        }, 50);
+        hud._omniRemove = function () {
+          document.removeEventListener('keydown', onKey);
+          document.removeEventListener('mousedown', onOut);
+        };
+      }
+
+      function _hideHud() {
+        var hud = document.getElementById('omniPrimHud');
+        hud.style.display = 'none';
+        if (hud._omniRemove) { hud._omniRemove(); hud._omniRemove = null; }
+      }
+
+      /* ── Boot ──────────────────────────────────────────────────── */
+      // Attempt initial connection once the page is interactive
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', _connect);
+      } else {
+        _connect();
+      }
+    })();
+    </script>
   </body>
 </html>
