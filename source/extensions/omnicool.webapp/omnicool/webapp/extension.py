@@ -178,13 +178,25 @@ def _pick_prim_path(norm_x: float, norm_y: float) -> str:
     """
     Pick a prim in the active viewport using normalized coordinates [0..1].
 
-    Tries hardware raycast picking via omni.kit.raycast.query when the viewport
-    is available.  Falls back to returning the first currently-selected prim so
-    the workflow "select a prim, then hold I + click to inspect it" always works
-    even when GPU picking is unavailable (e.g., headless or viewer mode).
+    Selection is tried first because the primary user workflow is:
+    "select a prim in the Kit viewport, then trigger the HUD gesture from the
+    browser".  Reading the active selection is the most reliable way to
+    identify the user's intended prim regardless of whether browser cursor
+    coordinates align with Kit's viewport coordinate space.
+
+    When the selection is empty (e.g. the user triggered the gesture without
+    pre-selecting anything) hardware raycast picking is attempted via
+    omni.kit.raycast.query so that pointing at a prim in the WebRTC video
+    still works.
 
     Returns the prim path string or "" if nothing is found.
     """
+    # 1. Prefer the active USD selection — the user's explicit intent.
+    paths = _get_selection_paths()
+    if paths:
+        return paths[0]
+
+    # 2. Fallback: hardware raycast when nothing is selected.
     try:
         vp = vp_utils.get_active_viewport_window()
         if vp is not None:
@@ -214,9 +226,7 @@ def _pick_prim_path(norm_x: float, norm_y: float) -> str:
     except Exception as e:
         carb.log_warn(f"[omnicool.webapp][pick] viewport pick failed: {e}")
 
-    # Reliable fallback: return the first currently selected prim.
-    paths = _get_selection_paths()
-    return paths[0] if paths else ""
+    return ""
 
 def _json_safe(value):
     # Convert common USD / pxr types into JSON-serializable values
