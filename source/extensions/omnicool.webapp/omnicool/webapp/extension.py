@@ -522,13 +522,21 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                 # Replaces the multi-round-trip sequence:
                 #   usd.pick → usd.list_attrs → N × usd.get_attr
                 # with a single request, halving latency for the I-key gesture.
-                norm_x = float(payload.get("x", 0.0))
-                norm_y = float(payload.get("y", 0.0))
-                max_attrs = int(payload.get("maxAttrs", 8))
-                prim_path = _pick_prim_path(norm_x, norm_y)
+                norm_x      = float(payload.get("x", 0.0))
+                norm_y      = float(payload.get("y", 0.0))
+                max_attrs   = int(payload.get("maxAttrs", 8))
+                pinned_attr = payload.get("pinnedAttr", "")
+                prim_path   = _pick_prim_path(norm_x, norm_y)
                 if not prim_path:
                     return {"id": req_id, "ok": True, "payload": {"primPath": None, "attrs": []}}
-                attr_names = _list_attrs(stage, prim_path)[:max_attrs]
+                all_names  = _list_attrs(stage, prim_path)
+                # Pinned attr (e.g. "flownex:componentName") is always first when
+                # present, regardless of the max_attrs cap.
+                if pinned_attr and pinned_attr in all_names:
+                    rest = [n for n in all_names if n != pinned_attr]
+                    attr_names = [pinned_attr] + rest[:max_attrs]
+                else:
+                    attr_names = all_names[:max_attrs]
                 attr_values = []
                 for name in attr_names:
                     try:

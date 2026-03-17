@@ -55,6 +55,9 @@
       .omni-hud-tbl td { padding: 2px 8px 2px 0; vertical-align: top; }
       .omni-hud-attr-name { color: #64b5f6; font-family: monospace; white-space: nowrap; }
       .omni-hud-attr-val  { color: #eee; font-family: monospace; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .omni-hud-pinned-row td { background: rgba(100,181,246,.08); }
+      .omni-hud-pinned-row .omni-hud-attr-name { color: #ffd54f; font-weight: 700; }
+      .omni-hud-pinned-row .omni-hud-attr-val  { color: #ffd54f; white-space: normal; }
       .omni-hud-empty { font-size: 11px; color: #aaa; margin-bottom: 4px; }
       .omni-hud-hint  { font-size: 10px; color: #aaa; margin-top: 7px; padding-top: 5px; border-top: 1px solid #2a2a4a; }
       .omni-hud-btn {
@@ -79,10 +82,11 @@
     (function () {
       'use strict';
 
-      var _cfg      = window.OMNICOOL_CONFIG || {};
-      var WS_URL    = _cfg.wsUrl    || 'ws://127.0.0.1:8899';
-      var HOLD_MS   = _cfg.holdMs   || 1000;
-      var MAX_ATTRS = _cfg.maxAttrs || 10;
+      var _cfg         = window.OMNICOOL_CONFIG || {};
+      var WS_URL       = _cfg.wsUrl      || 'ws://127.0.0.1:8899';
+      var HOLD_MS      = _cfg.holdMs     || 1000;
+      var MAX_ATTRS    = _cfg.maxAttrs   || 10;
+      var TRACKED_ATTR = _cfg.trackedAttr || '';
 
       var _ws        = null;
       var _msgId     = 0;
@@ -161,7 +165,7 @@
       function _inspect(cx, cy) {
         var nx = cx / window.innerWidth;
         var ny = cy / window.innerHeight;
-        _send('usd.get_prim_info', { x: nx, y: ny, maxAttrs: MAX_ATTRS })
+        _send('usd.get_prim_info', { x: nx, y: ny, maxAttrs: MAX_ATTRS, pinnedAttr: TRACKED_ATTR })
           .then(function (data) { _showHud(cx, cy, data.primPath, data.attrs || []); })
           .catch(function (err) { _showHud(cx, cy, null, [], err.message); });
       }
@@ -188,8 +192,11 @@
                + '<div class="omni-hud-hint">Select a prim in the viewport first, then try again.</div>';
         } else {
           var rows = attrs.map(function (a) {
-            return '<tr><td class="omni-hud-attr-name">' + _esc(a.name) + '</td>'
-                 + '<td class="omni-hud-attr-val">' + _esc(_fmt(a.value)) + '</td></tr>';
+            var isPinned = TRACKED_ATTR && a.name === TRACKED_ATTR;
+            var trClass  = isPinned ? ' class="omni-hud-pinned-row"' : '';
+            return '<tr' + trClass + '>'
+                 + '<td class="omni-hud-attr-name">' + _esc(a.name) + '</td>'
+                 + '<td class="omni-hud-attr-val">'  + _esc(_fmt(a.value)) + '</td></tr>';
           }).join('');
           html = '<div class="omni-hud-path">' + _esc(primPath) + '</div>'
                + (rows ? '<table class="omni-hud-tbl"><tbody>' + rows + '</tbody></table>'
