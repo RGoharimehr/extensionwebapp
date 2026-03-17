@@ -11,7 +11,7 @@ import omni.kit.app
 import carb
 import omni.kit.viewport.utility as vp_utils
 import omni.usd
-from pxr import UsdGeom, Sdf, Gf
+from pxr import UsdGeom, Sdf, Gf, Usd, Tf
 
 from omnicool.webapp import flownex_metadata as _fx
 from omnicool.webapp.webrtc_server import WebRTCSignalingServer
@@ -35,10 +35,165 @@ def _stage():
 def _get_selection_paths():
     """
     Omniverse-native "what user clicked/selected" source of truth.
+    Uses SourceType.ALL to include both native USD and Fabric-backed selection.
     Works for Kit App Template and Kit CAE streaming.
     """
-    sel = omni.usd.get_context().get_selection()
-    return [str(p) for p in sel.get_selected_prim_paths()]
+    ctx = omni.usd.get_context()
+    sel = ctx.get_selection() if ctx else None
+    if not sel:
+        return []
+    try:
+        paths = list(sel.get_selected_prim_paths(omni.usd.Selection.SourceType.ALL))
+    except TypeError:
+        # Backward-compat: some environments may not support the source parameter.
+        paths = list(sel.get_selected_prim_paths())
+    return [str(p) for p in paths if p]
+
+
+def _filter_to_valid_usd_prims(stage: "Usd.Stage", prim_paths: list) -> list:
+    """
+    When SourceType.ALL is used, results can include Fabric-only paths that don't
+    resolve to a valid prim on the USD stage. Keep only USD-valid prims.
+    """
+    out = []
+    for p in prim_paths:
+        try:
+            prim = stage.GetPrimAtPath(p)
+        except Exception:
+            continue
+        if prim and prim.IsValid():
+            out.append(p)
+    return out
+
+
+def _selection_source_from_string(source: str):
+    """Map a string token ('usd'/'fabric'/'all') to the SourceType enum."""
+    source = (source or "all").strip().lower()
+    if source == "usd":
+        return omni.usd.Selection.SourceType.USD
+    if source == "fabric":
+        return omni.usd.Selection.SourceType.FABRIC
+    return omni.usd.Selection.SourceType.ALL
+
+
+async def _get_selected_prim_paths_async(
+    *,
+    source: str = "all",
+    wait_frames: int = 2,
+) -> list:
+    """
+    Read selected prim paths with a small frame-wait retry to mitigate selection
+    propagation races (UI events and network messages arriving in the same frame).
+    """
+    ctx = omni.usd.get_context()
+    sel = ctx.get_selection() if ctx else None
+    if not sel:
+        return []
+
+    src_enum = _selection_source_from_string(source)
+
+    for attempt in range(max(0, int(wait_frames)) + 1):
+        try:
+            paths = list(sel.get_selected_prim_paths(src_enum))
+        except TypeError:
+            paths = list(sel.get_selected_prim_paths())
+
+        paths = [str(p) for p in paths if p]
+        if paths:
+            return paths
+
+        if attempt < wait_frames:
+            await omni.kit.app.get_app().next_update_async()
+
+    return []
+
+
+def _usd_value_to_json(value):
+    """
+    Convert common pxr/USD Python types into JSON-serializable values.
+    Handles Vec*, Matrix*, Vt arrays, paths, tokens, and scalar types.
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+
+    # Common scalar pxr types
+    if isinstance(value, (Sdf.Path, Sdf.AssetPath)):
+        return str(value)
+    try:
+        if isinstance(value, Tf.Token):
+            return str(value)
+    except Exception:
+        pass
+
+    # Gf vector/quaternion types
+    try:
+        if isinstance(value, (
+            Gf.Vec2f, Gf.Vec3f, Gf.Vec4f,
+            Gf.Vec2d, Gf.Vec3d, Gf.Vec4d,
+            Gf.Vec2i, Gf.Vec3i, Gf.Vec4i,
+            Gf.Quatf, Gf.Quatd,
+        )):
+            return [float(x) for x in value]
+    except Exception:
+        pass
+
+    # Gf matrix types -> nested lists
+    try:
+        if isinstance(value, (Gf.Matrix2d, Gf.Matrix3d, Gf.Matrix4d)):
+            return [[float(c) for c in row] for row in value]
+    except Exception:
+        pass
+
+    # Generic iterables: Vt arrays, lists, tuples, etc.
+    try:
+        if hasattr(value, "__iter__") and not isinstance(value, (bytes, bytearray)):
+            return [_usd_value_to_json(v) for v in list(value)]
+    except Exception:
+        pass
+
+    # Scalar fallback
+    try:
+        return float(value)
+    except Exception:
+        return str(value)
+
+
+def _read_attribute_from_prim(prim, attr_full_name: str, *, time_code=None) -> dict:
+    """
+    Read a named attribute from a validated USD prim.
+    attr_full_name must be the full token including namespace (e.g. 'physics:mass').
+    Returns a structured dict with 'found', 'typeName', 'value', 'time' fields.
+    """
+    if not prim or not prim.IsValid():
+        raise ValueError("Prim is invalid.")
+    if not attr_full_name or not isinstance(attr_full_name, str):
+        raise ValueError("attr_full_name must be a non-empty string.")
+
+    if not prim.HasAttribute(attr_full_name):
+        return {"found": False, "reason": "attribute_missing", "attr": attr_full_name}
+
+    attr = prim.GetAttribute(attr_full_name)
+    if not attr or not attr.IsValid():
+        return {"found": False, "reason": "attribute_missing", "attr": attr_full_name}
+
+    type_name = attr.GetTypeName()
+    type_str = str(type_name) if type_name else None
+
+    if time_code is None:
+        value = attr.Get()
+        time_repr = "default"
+    else:
+        tc = Usd.TimeCode(float(time_code))
+        value = attr.Get(tc)
+        time_repr = float(time_code)
+
+    return {
+        "found": True,
+        "attr": attr_full_name,
+        "typeName": type_str,
+        "time": time_repr,
+        "value": _usd_value_to_json(value),
+    }
 
 
 def _prim_exists(stage, prim_path: str) -> bool:
@@ -561,6 +716,88 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                 prim_path = payload.get("primPath", "")
                 mat = _get_xform(stage, prim_path)
                 return {"id": req_id, "ok": True, "payload": {"matrix4x4": mat}}
+
+            if typ == "usd.get_selected_attr":
+                attr_full_name = payload.get("attr", "")
+                if not attr_full_name:
+                    return {
+                        "id": req_id,
+                        "ok": False,
+                        "error": "Missing required payload field: attr",
+                    }
+
+                selection_source = payload.get("selectionSource", "all")
+                wait_frames = int(payload.get("waitFrames", 2))
+                allow_multiple = bool(payload.get("allowMultiple", False))
+                time_code = payload.get("timeCode", None)
+
+                # Stage guard (stage already validated above, but re-check after await)
+                raw_paths = await _get_selected_prim_paths_async(
+                    source=selection_source,
+                    wait_frames=wait_frames,
+                )
+
+                if not raw_paths:
+                    return {
+                        "id": req_id,
+                        "ok": True,
+                        "payload": {
+                            "primPaths": [],
+                            "reason": "no_selection",
+                        },
+                    }
+
+                # Re-acquire stage after await in case it changed
+                stage_now = _stage()
+                if stage_now is None:
+                    return {"id": req_id, "ok": False, "error": "No USD stage available"}
+
+                usd_paths = _filter_to_valid_usd_prims(stage_now, raw_paths)
+                if not usd_paths:
+                    return {
+                        "id": req_id,
+                        "ok": True,
+                        "payload": {
+                            "primPaths": [],
+                            "reason": "selection_not_on_usd_stage",
+                            "rawSelectionPaths": raw_paths,
+                        },
+                    }
+
+                if (not allow_multiple) and len(usd_paths) != 1:
+                    return {
+                        "id": req_id,
+                        "ok": True,
+                        "payload": {
+                            "primPaths": usd_paths,
+                            "reason": "multiple_selection",
+                        },
+                    }
+
+                results = []
+                for p in (usd_paths if allow_multiple else [usd_paths[0]]):
+                    prim = stage_now.GetPrimAtPath(p)
+                    if not prim or not prim.IsValid():
+                        results.append({
+                            "primPath": p,
+                            "found": False,
+                            "reason": "prim_invalid",
+                            "attr": attr_full_name,
+                        })
+                        continue
+                    item = _read_attribute_from_prim(prim, attr_full_name, time_code=time_code)
+                    item["primPath"] = p
+                    item["primTypeName"] = str(prim.GetTypeName())
+                    results.append(item)
+
+                return {
+                    "id": req_id,
+                    "ok": True,
+                    "payload": {
+                        "primPaths": usd_paths if allow_multiple else [usd_paths[0]],
+                        "results": results,
+                    },
+                }
 
             # -----------------------------------------------------------------
             # Flownex controller metadata  (flownex.*)
