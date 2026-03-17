@@ -14,6 +14,7 @@ import omni.usd
 from pxr import UsdGeom, Sdf, Gf, Usd, Tf
 
 from omnicool.webapp import flownex_metadata as _fx
+from omnicool.webapp import flownex_attr_tools as _fat
 from omnicool.webapp.webrtc_server import WebRTCSignalingServer
 
 
@@ -930,6 +931,16 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                     return {"id": req_id, "ok": True, "payload": {"meta": meta}}
 
                 return {"id": req_id, "ok": False, "error": f"Unknown flownex type: {typ}"}
+
+            # -----------------------------------------------------------------
+            # Flownex stage-wide tools  (flownex_tools.*)
+            # These handlers do NOT require a primPath — they work on the whole
+            # stage (or a sub-tree) and delegate to flownex_attr_tools.
+            # -----------------------------------------------------------------
+            if typ == "flownex_tools.deinstance_and_add_flownex":
+                root = payload.get("root", "/World")
+                summary = _fat.deinstance_and_add_flownex(root)
+                return {"id": req_id, "ok": True, "payload": {"summary": summary}}
 
             return {"id": req_id, "ok": False, "error": f"Unknown type: {typ}"}
 
