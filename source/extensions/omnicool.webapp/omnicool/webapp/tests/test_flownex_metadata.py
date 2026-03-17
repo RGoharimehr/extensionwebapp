@@ -120,7 +120,33 @@ class TestFlownexMetadata(omni.kit.test.AsyncTestCase):
         self.assertIn("ready", meta)
         self.assertIn("cache", meta)
         self.assertIn("intent", meta)
+        self.assertIn("componentName", meta)
         self.assertEqual(meta["runtime"]["state"], "idle")
+
+    async def test_component_name_usd_attr_authored_on_ensure(self):
+        """After ensure_controller_metadata, flownex:componentName is a real USD attribute."""
+        fx.ensure_controller_metadata(self.prim)
+        self.assertTrue(self.prim.HasAttribute("flownex:componentName"))
+        attr = self.prim.GetAttribute("flownex:componentName")
+        self.assertTrue(attr.IsValid())
+        # Default value is an empty string
+        self.assertEqual(attr.Get(), "")
+
+    async def test_component_name_usd_attr_reflects_metadata_value(self):
+        """Setting componentName in metadata updates the USD attribute."""
+        fx.ensure_controller_metadata(self.prim)
+        fx.patch_controller_metadata(self.prim, {"componentName": "My Flownex Controller"})
+        attr = self.prim.GetAttribute("flownex:componentName")
+        self.assertEqual(attr.Get(), "My Flownex Controller")
+
+    async def test_component_name_usd_attr_survives_other_metadata_writes(self):
+        """Writing unrelated metadata fields does not clear flownex:componentName."""
+        fx.ensure_controller_metadata(self.prim)
+        fx.patch_controller_metadata(self.prim, {"componentName": "Rack Controller"})
+        # Write runtime state (unrelated field)
+        fx.set_runtime_state(self.prim, state="steady_running")
+        attr = self.prim.GetAttribute("flownex:componentName")
+        self.assertEqual(attr.Get(), "Rack Controller")
 
     async def test_get_returns_empty_before_ensure(self):
         self.assertEqual(fx.get_controller_metadata(self.prim), {})

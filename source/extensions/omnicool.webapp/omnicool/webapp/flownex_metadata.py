@@ -57,7 +57,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
-from pxr import Usd
+from pxr import Sdf, Usd
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +130,12 @@ def default_flownex_controller_metadata() -> Dict[str, Any]:
     return {
         "schemaVersion": SCHEMA_VERSION,
 
+        # Human-readable name for this controller / Flownex component.
+        # Also authored as a USD attribute ``flownex:componentName`` so that
+        # standard USD attribute queries (e.g. prim.HasAttribute / GetAttribute)
+        # can find it without needing to inspect customData.
+        "componentName": "",
+
         "ready": {
             "attachedProject": False,
             "simulationController": False,
@@ -192,13 +198,23 @@ def get_controller_metadata(prim: Usd.Prim) -> Dict[str, Any]:
 
 
 def set_controller_metadata(prim: Usd.Prim, meta: Dict[str, Any]) -> None:
-    """Overwrite prim.customData[META_KEY] with *meta* (serialised as a JSON string)."""
+    """Overwrite prim.customData[META_KEY] with *meta* (serialised as a JSON string).
+
+    Also authors the ``flownex:componentName`` USD attribute so that standard
+    USD attribute queries (``prim.HasAttribute`` / ``prim.GetAttribute``) resolve
+    the component name without having to inspect customData directly.
+    """
     _require_prim(prim)
     meta = _as_dict(meta, "meta")
     meta.setdefault("schemaVersion", SCHEMA_VERSION)
     cd = prim.GetCustomData() or {}
     cd[META_KEY] = json.dumps(meta)
     prim.SetCustomData(cd)
+    # Author flownex:componentName as a real USD attribute so USD tooling
+    # and the usd.get_selected_attr / usd.get_attr WS endpoints can find it.
+    component_name = str(meta.get("componentName") or "")
+    attr = prim.CreateAttribute("flownex:componentName", Sdf.ValueTypeNames.String, custom=True)
+    attr.Set(component_name)
 
 
 def ensure_controller_metadata(prim: Usd.Prim) -> Dict[str, Any]:
