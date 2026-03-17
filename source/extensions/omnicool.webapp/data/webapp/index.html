@@ -163,9 +163,7 @@
 
       /* ── Fetch + show ──────────────────────────────────────────── */
       function _inspect(cx, cy) {
-        var nx = cx / window.innerWidth;
-        var ny = cy / window.innerHeight;
-        _send('usd.get_prim_info', { x: nx, y: ny, maxAttrs: MAX_ATTRS, pinnedAttr: TRACKED_ATTR })
+        _send('usd.get_prim_info', { maxAttrs: MAX_ATTRS, pinnedAttr: TRACKED_ATTR })
           .then(function (data) { _showHud(cx, cy, data.primPath, data.attrs || []); })
           .catch(function (err) { _showHud(cx, cy, null, [], err.message); });
       }

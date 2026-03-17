@@ -9,7 +9,6 @@ from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 import omni.ext
 import omni.kit.app
 import carb
-import omni.kit.viewport.utility as vp_utils
 import omni.usd
 from pxr import UsdGeom, Sdf, Gf
 
@@ -173,52 +172,6 @@ def _get_xform(stage, prim_path: str):
     return [[float(mat[r][c]) for c in range(4)] for r in range(4)]
 
 
-
-def _pick_prim_path(norm_x: float, norm_y: float) -> str:
-    """
-    Pick a prim in the active viewport using normalized coordinates [0..1].
-
-    Tries hardware raycast picking via omni.kit.raycast.query when the viewport
-    is available.  Falls back to returning the first currently-selected prim so
-    the workflow "select a prim, then hold I + click to inspect it" always works
-    even when GPU picking is unavailable (e.g., headless or viewer mode).
-
-    Returns the prim path string or "" if nothing is found.
-    """
-    try:
-        vp = vp_utils.get_active_viewport_window()
-        if vp is not None:
-            try:
-                w, h = vp.get_texture_resolution()
-            except Exception:
-                w, h = 0, 0
-            if w and h:
-                px = int(norm_x * w)
-                # y from top -> bottom-origin for Kit's picking API
-                py_flipped = int((1.0 - norm_y) * h)
-                import importlib
-                for api in ("omni.kit.raycast.query",):
-                    try:
-                        mod = importlib.import_module(api)
-                        pick_fn = getattr(mod, "pick_prim", None)
-                        if pick_fn is not None:
-                            hit = pick_fn(px, py_flipped)
-                            if hit and getattr(hit, "prim_path", None):
-                                return str(hit.prim_path)
-                            # Also try top-origin coords in case API differs
-                            hit = pick_fn(px, int(norm_y * h))
-                            if hit and getattr(hit, "prim_path", None):
-                                return str(hit.prim_path)
-                    except Exception:
-                        pass
-    except Exception as e:
-        carb.log_warn(f"[omnicool.webapp][pick] viewport pick failed: {e}")
-
-    # Reliable fallback: return the first currently selected prim.
-    # The documented user workflow is to select a prim first and then
-    # trigger the HUD gesture, so this covers the common case.
-    paths = _get_selection_paths()
-    return paths[0] if paths else ""
 
 def _json_safe(value):
     # Convert common USD / pxr types into JSON-serializable values
@@ -512,21 +465,18 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                 return {"id": req_id, "ok": True, "payload": {"exists": _prim_exists(stage, prim_path)}}
 
             if typ == "usd.pick":
-                norm_x = float(payload.get("x", 0.0))
-                norm_y = float(payload.get("y", 0.0))
-                prim_path = _pick_prim_path(norm_x, norm_y)
+                paths = _get_selection_paths()
+                prim_path = paths[0] if paths else ""
                 return {"id": req_id, "ok": True, "payload": {"primPath": prim_path or None}}
 
             if typ == "usd.get_prim_info":
-                # Combined pick + attribute fetch for the prim-info HUD.
-                # Replaces the multi-round-trip sequence:
-                #   usd.pick → usd.list_attrs → N × usd.get_attr
-                # with a single request, halving latency for the I-key gesture.
-                norm_x      = float(payload.get("x", 0.0))
-                norm_y      = float(payload.get("y", 0.0))
+                # Combined selection-read + attribute fetch for the prim-info HUD.
+                # Uses the current Kit USD selection — the user selects a prim in the
+                # WebRTC viewport (which selects it in Kit) and then triggers the HUD.
                 max_attrs   = int(payload.get("maxAttrs", 8))
                 pinned_attr = payload.get("pinnedAttr", "")
-                prim_path   = _pick_prim_path(norm_x, norm_y)
+                paths       = _get_selection_paths()
+                prim_path   = paths[0] if paths else ""
                 if not prim_path:
                     return {"id": req_id, "ok": True, "payload": {"primPath": None, "attrs": []}}
                 all_names  = _list_attrs(stage, prim_path)
