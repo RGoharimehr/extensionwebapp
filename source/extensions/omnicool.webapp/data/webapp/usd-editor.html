@@ -71,6 +71,13 @@
     #toast.err { border-left-color: var(--error); }
     /* ── Scrollbar ── */
     ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+    /* ── Result Mapping panel ── */
+    .result-mapping-panel { padding: 14px 18px; background: var(--surface); border-top: 1px solid var(--border); flex-shrink: 0; }
+    .result-mapping-panel h3 { font-size: 12px; font-weight: 600; color: var(--text-dim); margin-bottom: 10px; }
+    .result-mapping-panel .rm-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .result-mapping-panel .rm-row label { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+    .result-mapping-panel .rm-row input { background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 5px 8px; border-radius: 4px; font-size: 12px; font-family: monospace; width: 140px; }
+    #rmResult { margin-top: 8px; font-size: 12px; color: var(--success); min-height: 1.4em; }
   </style>
 </head>
 <body>
@@ -145,6 +152,15 @@
         <input id="newVal" placeholder="initial value (JSON, optional)" />
         <button class="btn-primary" onclick="createAttr()">Create</button>
       </div>
+    </div>
+    <div class="result-mapping-panel">
+      <h3>⚙ Result Mapping</h3>
+      <div class="rm-row">
+        <label>Root path:</label>
+        <input id="rmRoot" value="/World" placeholder="/World" />
+        <button class="btn-secondary" onclick="runDeinstanceAndAddFlownex()">De-instance &amp; Add Flownex Attrs</button>
+      </div>
+      <div id="rmResult"></div>
     </div>
   </div>
 </main>
@@ -365,6 +381,24 @@
   }
   function esc(s) {
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  /* ── Result Mapping ────────────────────────────────────────── */
+  async function runDeinstanceAndAddFlownex() {
+    const root = document.getElementById('rmRoot').value.trim() || '/World';
+    const lbl  = document.getElementById('rmResult');
+    lbl.style.color = 'var(--text-dim)';
+    lbl.textContent = 'Running…';
+    try {
+      const r = await send('flownex_tools.deinstance_and_add_flownex', { root });
+      lbl.style.color = 'var(--success)';
+      lbl.textContent = r.summary || 'Done.';
+      toast('✓ ' + (r.summary || 'Done.'));
+    } catch(e) {
+      lbl.style.color = 'var(--error)';
+      lbl.textContent = 'Error: ' + e.message;
+      toast('Error: ' + e.message, true);
+    }
   }
 
   /* Auto-connect */

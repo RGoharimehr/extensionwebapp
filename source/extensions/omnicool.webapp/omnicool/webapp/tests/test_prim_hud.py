@@ -76,7 +76,7 @@ class TestPrimHud(omni.kit.test.AsyncTestCase):
         ctx = omni.usd.get_context()
         ctx.get_selection().clear_selected_prim_paths()
 
-        from omnicool.webapp.extension import _pick_prim_path
+        from omnicool.webapp.backend.usd_helpers import _pick_prim_path
         result = _pick_prim_path(0.5, 0.5)
         self.assertIn(result, ("", None, []))  # empty string or falsy
 
@@ -86,7 +86,7 @@ class TestPrimHud(omni.kit.test.AsyncTestCase):
         ctx = omni.usd.get_context()
         ctx.get_selection().set_selected_prim_paths(["/World/Cube"], False)
 
-        from omnicool.webapp.extension import _pick_prim_path
+        from omnicool.webapp.backend.usd_helpers import _pick_prim_path
         result = _pick_prim_path(0.5, 0.5)
         self.assertEqual(result, "/World/Cube")
 
@@ -96,7 +96,7 @@ class TestPrimHud(omni.kit.test.AsyncTestCase):
 
     async def test_get_attr_missing_attr_returns_null_value(self):
         """usd.get_attr for a non-existent attr → {ok: true, value: null}."""
-        from omnicool.webapp.extension import _get_attr
+        from omnicool.webapp.backend.usd_helpers import _get_attr
         stage = _make_stage_with_cube()
         # Attribute does not exist on this prim
         try:
@@ -107,7 +107,7 @@ class TestPrimHud(omni.kit.test.AsyncTestCase):
 
     async def test_get_attr_existing_attr_returns_value(self):
         """usd.get_attr for an existing attribute returns the value."""
-        from omnicool.webapp.extension import _get_attr
+        from omnicool.webapp.backend.usd_helpers import _get_attr
         stage = Usd.Stage.CreateInMemory()
         cube = UsdGeom.Cube.Define(stage, "/World/Cube")
         cube.GetSizeAttr().Set(2.0)
