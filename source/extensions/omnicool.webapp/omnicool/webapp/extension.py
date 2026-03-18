@@ -13,9 +13,9 @@ import omni.kit.viewport.utility as vp_utils
 import omni.usd
 from pxr import UsdGeom, Sdf, Gf, Usd, Tf
 
-from omnicool.webapp import flownex_metadata as _fx
-from omnicool.webapp import flownex_attr_tools as _fat
-from omnicool.webapp.webrtc_server import WebRTCSignalingServer
+from omnicool.webapp.backend import flownex_metadata as _fx
+from omnicool.webapp.backend import flownex_attr_tools as _fat
+from omnicool.webapp.transport.webrtc_server import WebRTCSignalingServer
 
 
 # -----------------------------

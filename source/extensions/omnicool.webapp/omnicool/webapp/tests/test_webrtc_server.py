@@ -39,7 +39,7 @@ try:
 except ImportError:
     _HAVE_AIORTC = False
 
-from omnicool.webapp.webrtc_server import (
+from omnicool.webapp.transport.webrtc_server import (
     WebRTCSignalingServer,
     _import_aiortc,
     _import_aiohttp,

@@ -23,7 +23,7 @@ so these tests run correctly inside omni.kit.test.
 import omni.kit.test
 from pxr import Sdf, Usd, UsdGeom
 
-import omnicool.webapp.flownex_results as fr
+import omnicool.webapp.backend.flownex_results as fr
 
 
 # ---------------------------------------------------------------------------

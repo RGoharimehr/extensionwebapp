@@ -25,7 +25,7 @@ import json
 import omni.kit.test
 from pxr import Usd, UsdGeom
 
-import omnicool.webapp.flownex_metadata as fx
+import omnicool.webapp.backend.flownex_metadata as fx
 
 
 # ---------------------------------------------------------------------------
