@@ -25,11 +25,12 @@ deinstance_and_add_flownex(root="/World") -> str
     under a *Flownex* group inside "Raw USD Properties" in standard USD tooling
     (e.g. Omniverse Stage panel).
 
-    **Skipped prim types**: Material, Shader, NodeGraph, GeomSubset, Camera,
-    all UsdLux light types, and any prim under a ``Looks`` path scope.  Creating
-    custom attributes on those prims (defined in referenced layers) can produce
-    USD "Empty typeName for <attr>" stage errors in the Omniverse viewport.
-    Those prims do not participate in Flownex simulation regardless.
+    **Mesh-only**: only prims whose USD type is ``Mesh`` receive Flownex
+    attributes.  Xform groups, Scopes, Cameras, lights, Material/Shader prims,
+    and all other non-geometry types are ignored.  This prevents USD
+    "Empty typeName" errors that arise from authoring custom attributes on
+    prims defined in referenced layers (e.g. ``Looks/Diffuse``), and ensures
+    Flownex simulation data is only attached to actual geometry.
 
     Returns a human-readable summary string.
 """
@@ -52,64 +53,43 @@ _RESULT_ATTRS_SPEC = [
 ]
 
 # ---------------------------------------------------------------------------
-# Prim types that must NOT receive Flownex simulation attributes.
+# Only these USD prim types receive Flownex simulation attributes.
 #
-# Material, Shader, and related prims are commonly defined in *referenced*
-# layers (e.g. under /Looks/).  When USD tries to create a custom attribute
-# on such a prim via the root-layer edit target it produces an "over" spec
-# that lacks a typeName, which causes the USD stage to log:
-#   "Empty typeName for <path.flownex:volumetricFlowrate>"
-# Skipping these prim types entirely avoids the error and is semantically
-# correct – they never participate in a Flownex thermal simulation.
+# Flownex models thermal/fluid behaviour of physical components, which are
+# represented as UsdGeom.Mesh prims in a scene.  Every other prim type
+# (Xform groups, Scope, Camera, lights, Material, Shader, …) is irrelevant
+# to the simulation and must NOT be stamped.  Using an allowlist (rather than
+# a blocklist) is more robust: new prim types added in future USD versions
+# are automatically excluded unless explicitly added here.
+#
+# Using an allowlist also avoids the "Empty typeName for <attr>" USD stage
+# error that occurs when custom attributes are authored (via an "over" in the
+# root layer) on prims defined inside referenced layers such as Looks/Diffuse.
 # ---------------------------------------------------------------------------
-_SKIP_PRIM_TYPES: frozenset = frozenset({
-    # Shading / material graph
-    "Material",
-    "Shader",
-    "NodeGraph",
-    # Geometry helpers
-    "GeomSubset",
-    # Cameras
-    "Camera",
-    # Light types (UsdLux schema names)
-    "SphereLight",
-    "DistantLight",
-    "DomeLight",
-    "DiskLight",
-    "CylinderLight",
-    "PortalLight",
-    "RectLight",
-    "GeometryLight",
-    "PluginLight",
-    "LightFilter",
+_MESH_PRIM_TYPES: frozenset = frozenset({
+    "Mesh",
 })
 
 
 def _is_flownex_target(prim) -> bool:
     """Return ``True`` if *prim* should receive Flownex result attributes.
 
-    Prims are excluded when they:
-    * carry a known non-simulation schema type (Material, Shader, lights, …)
-    * live under a ``Looks`` path scope (USD convention for material content)
+    Only prims whose USD type is ``Mesh`` qualify.  All other prim types
+    (Xform, Scope, Camera, lights, Material, Shader, …) are excluded.
     """
-    if prim.GetTypeName() in _SKIP_PRIM_TYPES:
-        return False
-    # Any prim nested under a scope named "Looks" is material/shader content.
-    if "Looks" in prim.GetPath().pathString.split("/"):
-        return False
-    return True
+    return prim.GetTypeName() in _MESH_PRIM_TYPES
 
 
 def deinstance_and_add_flownex(root: str = "/World") -> str:
     """
     De-instance prims and stamp the full Flownex attribute family onto every
-    valid simulation prim under *root* that does not already have each attribute.
+    **Mesh** prim under *root* that does not already have each attribute.
 
-    **Skipped prim types**: Material, Shader, NodeGraph, GeomSubset, Camera,
-    light types, and any prim under a ``Looks`` path scope.  Creating custom
-    attributes on those prims (which are typically defined in referenced layers)
-    can produce USD "Empty typeName" errors, and they do not participate in
-    Flownex simulation regardless.
+    Only prims whose USD type is ``Mesh`` are stamped.  All other prim types
+    (Xform groups, Scope, Camera, lights, Material, Shader, …) are skipped.
+    This prevents USD "Empty typeName" errors from prims defined in referenced
+    layers (e.g. ``Looks/Diffuse``) and ensures Flownex simulation data is
+    only attached to actual geometry.
 
     All created attributes carry::
 
