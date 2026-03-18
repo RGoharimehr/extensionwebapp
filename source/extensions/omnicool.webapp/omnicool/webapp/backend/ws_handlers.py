@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 
 from omnicool.webapp.backend import flownex_attr_tools as _fat
+from omnicool.webapp.backend import flownex_bridge as _fb
 from omnicool.webapp.backend import flownex_metadata as _fx
 from omnicool.webapp.backend.usd_helpers import (
     _create_attr,
@@ -43,6 +44,34 @@ async def handle_ws_message(msg: str) -> dict:
     payload = data.get("payload") or {}
 
     try:
+        # -----------------------------------------------------------------
+        # Flownex bridge commands — no USD stage required
+        # These must be dispatched before the stage guard below.
+        # -----------------------------------------------------------------
+        if typ == "flownex.get_status":
+            return {"id": req_id, "ok": True, "payload": _fb.get_status()}
+
+        if typ == "flownex.get_config":
+            return {"id": req_id, "ok": True, "payload": _fb.get_config()}
+
+        if typ == "flownex.set_config":
+            result = _fb.set_config(payload)
+            if "error" in result:
+                return {"id": req_id, "ok": False, "error": result["error"]}
+            return {"id": req_id, "ok": True, "payload": result}
+
+        if typ == "flownex.load_inputs":
+            return {"id": req_id, "ok": True, "payload": {"inputs": _fb.load_inputs()}}
+
+        if typ == "flownex.load_static_inputs":
+            return {"id": req_id, "ok": True, "payload": {"inputs": _fb.load_static_inputs()}}
+
+        if typ == "flownex.load_outputs":
+            return {"id": req_id, "ok": True, "payload": {"outputs": _fb.load_outputs()}}
+
+        # -----------------------------------------------------------------
+        # USD-dependent commands (active stage required)
+        # -----------------------------------------------------------------
         stage = _stage()
         if stage is None:
             raise RuntimeError("No USD stage available")
