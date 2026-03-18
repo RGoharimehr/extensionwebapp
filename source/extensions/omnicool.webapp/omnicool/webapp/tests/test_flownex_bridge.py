@@ -64,9 +64,30 @@ class _MockApi:
         self.FlownexInstalltionDetected = available
         self.AttachedProject = object() if attached else None
         self.ProjectFile = project
+        self.attach_calls = []
+        self.close_called = False
+        self.exit_called = False
+        self.run_steady_result = True
 
     def IsFnxAvailable(self):
         return self.FlownexInstalltionDetected
+
+    def AttachToProject(self, path):
+        self.attach_calls.append(path)
+        if self.FlownexInstalltionDetected:
+            self.AttachedProject = object()
+            self.ProjectFile = path
+
+    def CloseProject(self):
+        self.close_called = True
+        self.AttachedProject = None
+        self.ProjectFile = ""
+
+    def ExitApplication(self):
+        self.exit_called = True
+
+    def RunSteadyStateSimulationBlocking(self):
+        return self.run_steady_result
 
 
 class _MockInput:
@@ -412,3 +433,131 @@ class TestFlownexBridge(omni.kit.test.AsyncTestCase):
         fb.reset_singletons(api=None, io=None)
         self.assertIsNone(fb._api)
         self.assertIsNone(fb._io)
+
+    # ------------------------------------------------------------------
+    # get_schema
+    # ------------------------------------------------------------------
+
+    async def test_get_schema_no_io_returns_empty_lists(self):
+        result = fb.get_schema()
+        self.assertIn("inputs", result)
+        self.assertIn("outputs", result)
+        self.assertEqual(result["inputs"], [])
+        self.assertEqual(result["outputs"], [])
+
+    async def test_get_schema_combines_dynamic_and_static_inputs(self):
+        dyn = _MockInput(key="dyn")
+        sta = _MockInput(key="sta")
+        out = _MockOutput(key="out")
+        fb.reset_singletons(api=None, io=_MockIO(inputs=[dyn], static_inputs=[sta], outputs=[out]))
+        result = fb.get_schema()
+        keys = [i["key"] for i in result["inputs"]]
+        self.assertIn("dyn", keys)
+        self.assertIn("sta", keys)
+        self.assertEqual(len(result["outputs"]), 1)
+
+    async def test_get_schema_is_json_serializable(self):
+        inp = _MockInput()
+        out = _MockOutput()
+        fb.reset_singletons(api=None, io=_MockIO(inputs=[inp], static_inputs=[inp], outputs=[out]))
+        json.dumps(fb.get_schema())  # must not raise
+
+    # ------------------------------------------------------------------
+    # open_project
+    # ------------------------------------------------------------------
+
+    async def test_open_project_no_api_returns_ok_false(self):
+        result = fb.open_project()
+        self.assertFalse(result["ok"])
+        self.assertIn("message", result)
+
+    async def test_open_project_no_project_path_returns_ok_false(self):
+        api = _MockApi(available=True, attached=False)
+        io = _MockIO()
+        io.UserSetup.FlownexProject = ""
+        fb.reset_singletons(api=api, io=io)
+        result = fb.open_project()
+        self.assertFalse(result["ok"])
+        self.assertIn("message", result)
+
+    async def test_open_project_calls_attach_and_returns_ok_true(self):
+        api = _MockApi(available=True, attached=False)
+        io = _MockIO()
+        io.UserSetup.FlownexProject = "/test/project.proj"
+        fb.reset_singletons(api=api, io=io)
+        result = fb.open_project()
+        self.assertTrue(result["ok"])
+        self.assertEqual(api.attach_calls, ["/test/project.proj"])
+
+    async def test_open_project_result_is_json_serializable(self):
+        api = _MockApi(available=True, attached=False)
+        io = _MockIO()
+        fb.reset_singletons(api=api, io=io)
+        json.dumps(fb.open_project())  # must not raise
+
+    # ------------------------------------------------------------------
+    # close_project
+    # ------------------------------------------------------------------
+
+    async def test_close_project_no_api_returns_ok_false(self):
+        result = fb.close_project()
+        self.assertFalse(result["ok"])
+
+    async def test_close_project_calls_close_and_returns_ok_true(self):
+        api = _MockApi(available=True, attached=True)
+        fb.reset_singletons(api=api, io=None)
+        result = fb.close_project()
+        self.assertTrue(result["ok"])
+        self.assertTrue(api.close_called)
+
+    async def test_close_project_result_is_json_serializable(self):
+        api = _MockApi()
+        fb.reset_singletons(api=api, io=None)
+        json.dumps(fb.close_project())  # must not raise
+
+    # ------------------------------------------------------------------
+    # exit_app
+    # ------------------------------------------------------------------
+
+    async def test_exit_app_no_api_returns_ok_false(self):
+        result = fb.exit_app()
+        self.assertFalse(result["ok"])
+
+    async def test_exit_app_calls_exit_and_returns_ok_true(self):
+        api = _MockApi(available=True, attached=True)
+        fb.reset_singletons(api=api, io=None)
+        result = fb.exit_app()
+        self.assertTrue(result["ok"])
+        self.assertTrue(api.exit_called)
+
+    async def test_exit_app_result_is_json_serializable(self):
+        api = _MockApi()
+        fb.reset_singletons(api=api, io=None)
+        json.dumps(fb.exit_app())  # must not raise
+
+    # ------------------------------------------------------------------
+    # run_steady
+    # ------------------------------------------------------------------
+
+    async def test_run_steady_no_api_returns_ok_false(self):
+        result = fb.run_steady()
+        self.assertFalse(result["ok"])
+
+    async def test_run_steady_success_returns_ok_true(self):
+        api = _MockApi(available=True, attached=True)
+        api.run_steady_result = True
+        fb.reset_singletons(api=api, io=None)
+        result = fb.run_steady()
+        self.assertTrue(result["ok"])
+
+    async def test_run_steady_failure_returns_ok_false(self):
+        api = _MockApi(available=True, attached=True)
+        api.run_steady_result = False
+        fb.reset_singletons(api=api, io=None)
+        result = fb.run_steady()
+        self.assertFalse(result["ok"])
+
+    async def test_run_steady_result_is_json_serializable(self):
+        api = _MockApi()
+        fb.reset_singletons(api=api, io=None)
+        json.dumps(fb.run_steady())  # must not raise

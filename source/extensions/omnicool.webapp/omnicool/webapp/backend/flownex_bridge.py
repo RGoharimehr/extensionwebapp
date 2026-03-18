@@ -270,3 +270,135 @@ def load_outputs() -> List[Dict[str, Any]]:
     except Exception as exc:  # noqa: BLE001
         log.warning("[flownex_bridge] load_outputs error: %s", exc)
         raise
+
+
+def get_schema() -> Dict[str, Any]:
+    """Return the combined inputs/outputs schema for the React webapp.
+
+    Merges dynamic inputs, static inputs, and outputs into a single dict
+    that the React app renders as its operating-conditions and results panels.
+
+    Returns
+    -------
+    dict with keys:
+        ``inputs``  – list of serialised ``InputDefinition`` dicts (dynamic + static).
+        ``outputs`` – list of serialised ``OutputDefinition`` dicts.
+    """
+    try:
+        inputs = (load_inputs() or []) + (load_static_inputs() or [])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[flownex_bridge] get_schema inputs error: %s", exc)
+        inputs = []
+    try:
+        outputs = load_outputs() or []
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[flownex_bridge] get_schema outputs error: %s", exc)
+        outputs = []
+    return {"inputs": inputs, "outputs": outputs}
+
+
+def open_project() -> Dict[str, Any]:
+    """Open / attach to the Flownex project configured in ``FlownexIO``.
+
+    Reads ``FlownexIO.Setup.FlownexProject`` to get the project path, then
+    calls :py:meth:`FNXApi.AttachToProject`.
+
+    Returns
+    -------
+    dict with keys:
+        ``ok``      – bool: True on success.
+        ``message`` – str: human-readable result.
+    """
+    api = _get_api()
+    if api is None:
+        return {"ok": False, "message": "Flownex API not available"}
+
+    # Resolve project path from FlownexIO config
+    project_path = ""
+    io = _get_io()
+    if io is not None:
+        try:
+            project_path = str(getattr(io.Setup, "FlownexProject", "") or "")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[flownex_bridge] open_project: cannot read FlownexProject: %s", exc)
+
+    if not project_path:
+        return {
+            "ok": False,
+            "message": "No project path configured. Send a 'configure' message first.",
+        }
+
+    try:
+        api.AttachToProject(project_path)
+        attached = getattr(api, "AttachedProject", None) is not None
+        if attached:
+            return {"ok": True, "message": f"Attached to project: {project_path}"}
+        return {"ok": False, "message": f"Failed to attach to project: {project_path}"}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[flownex_bridge] open_project error: %s", exc)
+        return {"ok": False, "message": str(exc)}
+
+
+def close_project() -> Dict[str, Any]:
+    """Close the currently attached Flownex project.
+
+    Returns
+    -------
+    dict with keys:
+        ``ok``      – bool: True on success.
+        ``message`` – str: human-readable result.
+    """
+    api = _get_api()
+    if api is None:
+        return {"ok": False, "message": "Flownex API not available"}
+    try:
+        api.CloseProject()
+        return {"ok": True, "message": "Project closed."}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[flownex_bridge] close_project error: %s", exc)
+        return {"ok": False, "message": str(exc)}
+
+
+def exit_app() -> Dict[str, Any]:
+    """Exit the Flownex application.
+
+    Returns
+    -------
+    dict with keys:
+        ``ok``      – bool: True on success.
+        ``message`` – str: human-readable result.
+    """
+    api = _get_api()
+    if api is None:
+        return {"ok": False, "message": "Flownex API not available"}
+    try:
+        api.ExitApplication()
+        return {"ok": True, "message": "Flownex exited."}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[flownex_bridge] exit_app error: %s", exc)
+        return {"ok": False, "message": str(exc)}
+
+
+def run_steady() -> Dict[str, Any]:
+    """Run a blocking steady-state Flownex simulation.
+
+    Returns
+    -------
+    dict with keys:
+        ``ok``      – bool: True when the solver converged.
+        ``message`` – str: human-readable result.
+    """
+    api = _get_api()
+    if api is None:
+        return {"ok": False, "message": "Flownex API not available"}
+    try:
+        success = bool(api.RunSteadyStateSimulationBlocking())
+        if success:
+            return {"ok": True, "message": "Steady-state simulation completed."}
+        return {
+            "ok": False,
+            "message": "Simulation did not converge or timed out.",
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[flownex_bridge] run_steady error: %s", exc)
+        return {"ok": False, "message": str(exc)}
