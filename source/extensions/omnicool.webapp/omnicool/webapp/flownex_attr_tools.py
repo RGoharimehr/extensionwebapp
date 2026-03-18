@@ -10,8 +10,8 @@ Public API
 ----------
 deinstance_and_add_flownex(root="/World") -> str
     De-instances every instanceable prim under *root*, then stamps the full
-    Flownex attribute family onto every valid, non-proxy, defined prim that does
-    not already carry each attribute.  The family consists of:
+    Flownex attribute family onto every valid *simulation* prim that does not
+    already carry each attribute.  The family consists of:
 
     * ``flownex:componentName``  (String) – display name assigned by the user
     * ``flownex:volumetricFlowrate`` (Float, default 0.0)
@@ -24,6 +24,12 @@ deinstance_and_add_flownex(root="/World") -> str
     All attributes are created with ``displayGroup = 'Flownex'`` so they appear
     under a *Flownex* group inside "Raw USD Properties" in standard USD tooling
     (e.g. Omniverse Stage panel).
+
+    **Skipped prim types**: Material, Shader, NodeGraph, GeomSubset, Camera,
+    all UsdLux light types, and any prim under a ``Looks`` path scope.  Creating
+    custom attributes on those prims (defined in referenced layers) can produce
+    USD "Empty typeName for <attr>" stage errors in the Omniverse viewport.
+    Those prims do not participate in Flownex simulation regardless.
 
     Returns a human-readable summary string.
 """
@@ -45,11 +51,65 @@ _RESULT_ATTRS_SPEC = [
     ("flownex:density",            "Float", 0.0),
 ]
 
+# ---------------------------------------------------------------------------
+# Prim types that must NOT receive Flownex simulation attributes.
+#
+# Material, Shader, and related prims are commonly defined in *referenced*
+# layers (e.g. under /Looks/).  When USD tries to create a custom attribute
+# on such a prim via the root-layer edit target it produces an "over" spec
+# that lacks a typeName, which causes the USD stage to log:
+#   "Empty typeName for <path.flownex:volumetricFlowrate>"
+# Skipping these prim types entirely avoids the error and is semantically
+# correct – they never participate in a Flownex thermal simulation.
+# ---------------------------------------------------------------------------
+_SKIP_PRIM_TYPES: frozenset = frozenset({
+    # Shading / material graph
+    "Material",
+    "Shader",
+    "NodeGraph",
+    # Geometry helpers
+    "GeomSubset",
+    # Cameras
+    "Camera",
+    # Light types (UsdLux schema names)
+    "SphereLight",
+    "DistantLight",
+    "DomeLight",
+    "DiskLight",
+    "CylinderLight",
+    "PortalLight",
+    "RectLight",
+    "GeometryLight",
+    "PluginLight",
+    "LightFilter",
+})
+
+
+def _is_flownex_target(prim) -> bool:
+    """Return ``True`` if *prim* should receive Flownex result attributes.
+
+    Prims are excluded when they:
+    * carry a known non-simulation schema type (Material, Shader, lights, …)
+    * live under a ``Looks`` path scope (USD convention for material content)
+    """
+    if prim.GetTypeName() in _SKIP_PRIM_TYPES:
+        return False
+    # Any prim nested under a scope named "Looks" is material/shader content.
+    if "Looks" in prim.GetPath().pathString.split("/"):
+        return False
+    return True
+
 
 def deinstance_and_add_flownex(root: str = "/World") -> str:
     """
     De-instance prims and stamp the full Flownex attribute family onto every
-    valid prim under *root* that does not already have each attribute.
+    valid simulation prim under *root* that does not already have each attribute.
+
+    **Skipped prim types**: Material, Shader, NodeGraph, GeomSubset, Camera,
+    light types, and any prim under a ``Looks`` path scope.  Creating custom
+    attributes on those prims (which are typically defined in referenced layers)
+    can produce USD "Empty typeName" errors, and they do not participate in
+    Flownex simulation regardless.
 
     All created attributes carry::
 
@@ -104,6 +164,7 @@ def deinstance_and_add_flownex(root: str = "/World") -> str:
                 or not prim.GetPath().pathString.startswith(root)
                 or prim.IsInstanceProxy()
                 or not prim.IsDefined()
+                or not _is_flownex_target(prim)
             ):
                 continue
 
