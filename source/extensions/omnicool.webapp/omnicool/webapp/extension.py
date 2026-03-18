@@ -10,6 +10,7 @@ import omni.ext
 import omni.kit.app
 import carb
 
+from omnicool.webapp.backend.bridge_ws_handlers import handle_bridge_connect, handle_bridge_message
 from omnicool.webapp.backend.usd_helpers import _get_attr, _pick_prim_path
 from omnicool.webapp.backend.ws_handlers import handle_ws_message
 from omnicool.webapp.transport.http_server import _StaticHandler, _ensure_websockets_installed
@@ -28,6 +29,10 @@ class OmnicoolWebAppExt(omni.ext.IExt):
         self._ws_server = None
         self._ws_task = None
 
+        # Bridge WS server state (port 8001 — used by the React webapp)
+        self._bridge_ws_server = None
+        self._bridge_ws_task = None
+
         # WebRTC signaling server state
         self._webrtc_server: WebRTCSignalingServer | None = None
         self._webrtc_task = None
@@ -44,6 +49,10 @@ class OmnicoolWebAppExt(omni.ext.IExt):
         self._ws_host = str(settings.get(f"{base}/wsHost") or "127.0.0.1")
         self._ws_port = int(settings.get(f"{base}/wsPort") or 8899)
 
+        # The React webapp hard-codes ws://127.0.0.1:8001/ws for its bridge.
+        self._bridge_ws_host = str(settings.get(f"{base}/bridgeWsHost") or "127.0.0.1")
+        self._bridge_ws_port = int(settings.get(f"{base}/bridgeWsPort") or 8001)
+
         self._webrtc_enabled = bool(settings.get(f"{base}/webrtcEnabled") or False)
         self._webrtc_host = str(settings.get(f"{base}/webrtcHost") or "127.0.0.1")
         self._webrtc_port = int(settings.get(f"{base}/webrtcPort") or 8900)
@@ -55,17 +64,20 @@ class OmnicoolWebAppExt(omni.ext.IExt):
         carb.log_info(f"[omnicool.webapp] web_root={self._web_root}")
         carb.log_info(f"[omnicool.webapp] http=http://{self._host}:{self._port}")
         carb.log_info(f"[omnicool.webapp] ws=ws://{self._ws_host}:{self._ws_port}")
+        carb.log_info(f"[omnicool.webapp] bridge_ws=ws://{self._bridge_ws_host}:{self._bridge_ws_port}")
         carb.log_info(f"[omnicool.webapp] webrtc enabled={self._webrtc_enabled} "
                       f"http://{self._webrtc_host}:{self._webrtc_port}")
 
         if self._auto:
             self._start_http()
             self._start_ws()
+            self._start_bridge_ws()
             if self._webrtc_enabled:
                 self._start_webrtc()
 
     def on_shutdown(self):
         self._stop_webrtc()
+        self._stop_bridge_ws()
         self._stop_ws()
         self._stop_http()
 
@@ -164,6 +176,72 @@ class OmnicoolWebAppExt(omni.ext.IExt):
             except Exception:
                 pass
             self._ws_server = None
+
+    # -----------------
+    # Bridge WebSocket (port 8001 — React webapp configuration/simulation protocol)
+    # -----------------
+    def _start_bridge_ws(self):
+        """Start the Flownex bridge WS server used by the React webapp.
+
+        The React app hard-codes ``ws://127.0.0.1:8001/ws`` as its WebSocket
+        URL.  This server handles the push-based protocol (configure,
+        open_project, run, …) and pushes back schema/state/status messages.
+        """
+        if self._bridge_ws_task:
+            return
+
+        async def _run():
+            try:
+                await _ensure_websockets_installed()
+                import websockets
+
+                async def handler(websocket):
+                    carb.log_info("[omnicool.webapp][bridge_ws] client connected")
+                    try:
+                        await handle_bridge_connect(websocket)
+                        async for msg in websocket:
+                            await handle_bridge_message(msg, websocket)
+                    except Exception as e:
+                        carb.log_warn(
+                            f"[omnicool.webapp][bridge_ws] client handler ended: {e}"
+                        )
+                    finally:
+                        carb.log_info(
+                            "[omnicool.webapp][bridge_ws] client disconnected"
+                        )
+
+                self._bridge_ws_server = await websockets.serve(
+                    handler, self._bridge_ws_host, self._bridge_ws_port
+                )
+                carb.log_info(
+                    f"[omnicool.webapp][bridge_ws] Serving "
+                    f"ws://{self._bridge_ws_host}:{self._bridge_ws_port}"
+                )
+
+                # Keep alive until cancelled
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                carb.log_error(f"[omnicool.webapp][bridge_ws] server failed: {e}")
+
+        loop = asyncio.get_event_loop()
+        self._bridge_ws_task = loop.create_task(_run())
+
+    def _stop_bridge_ws(self):
+        if self._bridge_ws_task:
+            try:
+                self._bridge_ws_task.cancel()
+            except Exception:
+                pass
+            self._bridge_ws_task = None
+
+        if self._bridge_ws_server:
+            try:
+                self._bridge_ws_server.close()
+            except Exception:
+                pass
+            self._bridge_ws_server = None
 
     # -----------------
     # WebRTC signaling (aiortc — pure Python, same process as Kit)
