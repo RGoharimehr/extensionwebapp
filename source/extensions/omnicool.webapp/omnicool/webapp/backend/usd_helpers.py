@@ -337,6 +337,111 @@ def _delete_attr(stage, prim_path: str, attr_name: str):
 
 
 # ---------------------------------------------------------------------------
+# Selected-prim attribute query helper
+# ---------------------------------------------------------------------------
+
+async def _get_selected_attr_results(
+    attr_full_name: str,
+    *,
+    selection_source: str = "all",
+    wait_frames: int = 2,
+    allow_multiple: bool = False,
+    time_code=None,
+) -> dict:
+    """
+    Resolve selected prims and read a named attribute from each.
+
+    Returns a partial response dict (without ``"id"``) ready to be merged
+    into the WebSocket reply by the caller.
+
+    Possible shapes returned
+    ------------------------
+    No selection::
+
+        {"ok": True, "payload": {"primPaths": [], "reason": "no_selection"}}
+
+    Selection not on USD stage::
+
+        {"ok": True, "payload": {"primPaths": [], "reason": "selection_not_on_usd_stage",
+                                 "rawSelectionPaths": [...]}}
+
+    Multiple selection (when *allow_multiple* is ``False``)::
+
+        {"ok": True, "payload": {"primPaths": [...], "reason": "multiple_selection"}}
+
+    Stage gone after await::
+
+        {"ok": False, "error": "No USD stage available"}
+
+    Success::
+
+        {"ok": True, "payload": {"primPaths": [...], "results": [...]}}
+    """
+    raw_paths = await _get_selected_prim_paths_async(
+        source=selection_source,
+        wait_frames=wait_frames,
+    )
+
+    if not raw_paths:
+        return {
+            "ok": True,
+            "payload": {
+                "primPaths": [],
+                "reason": "no_selection",
+            },
+        }
+
+    # Re-acquire stage after the await in case it changed.
+    stage_now = _stage()
+    if stage_now is None:
+        return {"ok": False, "error": "No USD stage available"}
+
+    usd_paths = _filter_to_valid_usd_prims(stage_now, raw_paths)
+    if not usd_paths:
+        return {
+            "ok": True,
+            "payload": {
+                "primPaths": [],
+                "reason": "selection_not_on_usd_stage",
+                "rawSelectionPaths": raw_paths,
+            },
+        }
+
+    if (not allow_multiple) and len(usd_paths) != 1:
+        return {
+            "ok": True,
+            "payload": {
+                "primPaths": usd_paths,
+                "reason": "multiple_selection",
+            },
+        }
+
+    results = []
+    for p in (usd_paths if allow_multiple else [usd_paths[0]]):
+        prim = stage_now.GetPrimAtPath(p)
+        if not prim or not prim.IsValid():
+            results.append({
+                "primPath": p,
+                "found": False,
+                "reason": "prim_invalid",
+                "attr": attr_full_name,
+            })
+            continue
+        item = _read_attribute_from_prim(prim, attr_full_name, time_code=time_code)
+        item["primPath"] = p
+        item["primTypeName"] = str(prim.GetTypeName())
+        results.append(item)
+
+    return {
+        "ok": True,
+        "payload": {
+            "primPaths": usd_paths if allow_multiple else [usd_paths[0]],
+            "results": results,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # Transform helper
 # ---------------------------------------------------------------------------
 

@@ -8,23 +8,20 @@ from __future__ import annotations
 
 import json
 
-import omni.usd
-
 from omnicool.webapp.backend import flownex_attr_tools as _fat
 from omnicool.webapp.backend import flownex_metadata as _fx
 from omnicool.webapp.backend.usd_helpers import (
     _create_attr,
     _delete_attr,
-    _filter_to_valid_usd_prims,
     _get_attr,
-    _get_selected_prim_paths_async,
+    _get_selected_attr_results,
+    _get_selection_paths,
     _get_xform,
     _json_safe,
     _list_attrs,
     _list_children,
     _pick_prim_path,
     _prim_exists,
-    _read_attribute_from_prim,
     _set_attr,
     _stage,
 )
@@ -51,13 +48,11 @@ async def handle_ws_message(msg: str) -> dict:
             raise RuntimeError("No USD stage available")
 
         if typ == "usd.get_selection":
-            ctx = omni.usd.get_context()
-            sel = ctx.get_selection()
-            paths = sel.get_selected_prim_paths() if sel else []
+            paths = _get_selection_paths()
             return {
                 "id": req_id,
                 "ok": True,
-                "payload": {"paths": list(paths)}
+                "payload": {"paths": paths}
             }
 
         if typ == "usd.ping":
@@ -129,78 +124,14 @@ async def handle_ws_message(msg: str) -> dict:
                     "ok": False,
                     "error": "Missing required payload field: attr",
                 }
-
-            selection_source = payload.get("selectionSource", "all")
-            wait_frames = int(payload.get("waitFrames", 2))
-            allow_multiple = bool(payload.get("allowMultiple", False))
-            time_code = payload.get("timeCode", None)
-
-            raw_paths = await _get_selected_prim_paths_async(
-                source=selection_source,
-                wait_frames=wait_frames,
+            result = await _get_selected_attr_results(
+                attr_full_name,
+                selection_source=payload.get("selectionSource", "all"),
+                wait_frames=int(payload.get("waitFrames", 2)),
+                allow_multiple=bool(payload.get("allowMultiple", False)),
+                time_code=payload.get("timeCode", None),
             )
-
-            if not raw_paths:
-                return {
-                    "id": req_id,
-                    "ok": True,
-                    "payload": {
-                        "primPaths": [],
-                        "reason": "no_selection",
-                    },
-                }
-
-            # Re-acquire stage after await in case it changed.
-            stage_now = _stage()
-            if stage_now is None:
-                return {"id": req_id, "ok": False, "error": "No USD stage available"}
-
-            usd_paths = _filter_to_valid_usd_prims(stage_now, raw_paths)
-            if not usd_paths:
-                return {
-                    "id": req_id,
-                    "ok": True,
-                    "payload": {
-                        "primPaths": [],
-                        "reason": "selection_not_on_usd_stage",
-                        "rawSelectionPaths": raw_paths,
-                    },
-                }
-
-            if (not allow_multiple) and len(usd_paths) != 1:
-                return {
-                    "id": req_id,
-                    "ok": True,
-                    "payload": {
-                        "primPaths": usd_paths,
-                        "reason": "multiple_selection",
-                    },
-                }
-
-            results = []
-            for p in (usd_paths if allow_multiple else [usd_paths[0]]):
-                prim = stage_now.GetPrimAtPath(p)
-                if not prim or not prim.IsValid():
-                    results.append({
-                        "primPath": p,
-                        "found": False,
-                        "reason": "prim_invalid",
-                        "attr": attr_full_name,
-                    })
-                    continue
-                item = _read_attribute_from_prim(prim, attr_full_name, time_code=time_code)
-                item["primPath"] = p
-                item["primTypeName"] = str(prim.GetTypeName())
-                results.append(item)
-
-            return {
-                "id": req_id,
-                "ok": True,
-                "payload": {
-                    "primPaths": usd_paths if allow_multiple else [usd_paths[0]],
-                    "results": results,
-                },
-            }
+            return {"id": req_id, **result}
 
         # -----------------------------------------------------------------
         # Flownex controller metadata  (flownex.*)
