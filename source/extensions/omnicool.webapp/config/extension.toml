@@ -30,7 +30,7 @@ exts."omnicool.webapp".autoLaunch = true
 exts."omnicool.webapp".openBrowser = true
 exts."omnicool.webapp".host = "127.0.0.1"
 exts."omnicool.webapp".port = 3001
-exts."omnicool.webapp".webRoot = "data/webapp"
+exts."omnicool.webapp".webRoot = "data/webapp"  # compiled runtime web app — do NOT point at frontend_source/
 
 # WebSocket USD bridge
 exts."omnicool.webapp".wsHost = "127.0.0.1"
