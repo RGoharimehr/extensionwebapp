@@ -254,9 +254,24 @@ class OmnicoolWebAppExt(omni.ext.IExt):
 
                 # ----------------------------------------------------------
                 # WebRTC signaling handlers (POST /webrtc/offer,
+                #                            OPTIONS /webrtc/offer CORS,
                 #                            GET  /webrtc/status)
                 # ----------------------------------------------------------
+                _CORS_HEADERS = {
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Methods": "POST, OPTIONS",
+                    "Access-Control-Allow-Headers": "Content-Type",
+                }
+
                 _webrtc_sessions: set = set()
+
+                async def cors_preflight_handler(request):
+                    """Handle the CORS preflight OPTIONS request the browser sends
+                    before POST /webrtc/offer when the page origin differs from the
+                    API origin (e.g. http://127.0.0.1:3001 → http://127.0.0.1:8001).
+                    Without this 200 response, the browser blocks the actual POST.
+                    """
+                    return web.Response(status=200, headers=_CORS_HEADERS)
 
                 async def offer_handler(request):
                     try:
@@ -306,7 +321,7 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                             "sdp": pc.localDescription.sdp,
                             "type": pc.localDescription.type,
                         },
-                        headers={"Access-Control-Allow-Origin": "*"},
+                        headers=_CORS_HEADERS,
                     )
 
                 async def _handle_dc_message(channel, message: str) -> None:
@@ -322,7 +337,7 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                 async def status_handler(request):
                     return web.json_response(
                         {"active_connections": len(_webrtc_sessions)},
-                        headers={"Access-Control-Allow-Origin": "*"},
+                        headers=_CORS_HEADERS,
                     )
 
                 # ----------------------------------------------------------
@@ -330,6 +345,7 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                 # ----------------------------------------------------------
                 app = web.Application()
                 app.router.add_get("/", ws_handler)
+                app.router.add_route("OPTIONS", "/webrtc/offer", cors_preflight_handler)
                 app.router.add_post("/webrtc/offer", offer_handler)
                 app.router.add_get("/webrtc/status", status_handler)
 
