@@ -38,3 +38,28 @@ async def _ensure_websockets_installed():
             f"WS bridge will NOT start. Error: {e}"
         )
         raise
+
+
+async def _ensure_aiohttp_installed():
+    """
+    Ensures the ``aiohttp`` library is available, installing it via
+    ``omni.kit.pipapi`` on first use if necessary.
+    """
+    try:
+        import aiohttp  # noqa: F401
+        return
+    except Exception:
+        pass
+
+    try:
+        import omni.kit.pipapi as pipapi
+        carb.log_warn("[omnicool.webapp][bridge] 'aiohttp' not found. Installing via pip...")
+        pipapi.install("aiohttp")
+        import aiohttp  # noqa: F401
+        carb.log_info("[omnicool.webapp][bridge] 'aiohttp' installed successfully.")
+    except Exception as e:
+        carb.log_error(
+            "[omnicool.webapp][bridge] Failed to import/install 'aiohttp'. "
+            f"Combined bridge server will NOT start. Error: {e}"
+        )
+        raise
