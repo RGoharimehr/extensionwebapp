@@ -1,0 +1,3 @@
+[submodule "webrtc-react"]
+	path = webrtc-react
+	url = https://github.com/RGoharimehr/webrtc-react.git
