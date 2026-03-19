@@ -4,7 +4,9 @@ _*/
 # Compiled python files.
 *.py[cod]
 __pycache__/
-
+*.pyc
+*.pyo
+*.pyd
 # Visual Studio files.
 /.vs
 **/.vscode/ipch
@@ -37,6 +39,8 @@ deps/**/user.toml
 
 # Streaming EventTrace
 *.etli
+
+
 
 /source/*
 !/source/extensions/

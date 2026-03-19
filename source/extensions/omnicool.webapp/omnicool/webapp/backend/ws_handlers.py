@@ -1,7 +1,7 @@
 """WebSocket message dispatcher.
 
 Translates incoming WebSocket JSON messages into USD stage operations,
-delegating to the appropriate helper modules.  No Omniverse extension
+delegating to the appropriate helper modules. No Omniverse extension
 lifecycle state is required — this is pure business logic.
 """
 from __future__ import annotations
@@ -69,6 +69,131 @@ async def handle_ws_message(msg: str) -> dict:
         if typ == "flownex.load_outputs":
             return {"id": req_id, "ok": True, "payload": {"outputs": _fb.load_outputs()}}
 
+        if typ == "flownex.get_schema":
+            return {"id": req_id, "ok": True, "payload": _fb.get_schema()}
+
+        if typ == "flownex.open_flownex":
+            result = _fb.open_flownex()
+            if result.get("ok"):
+                return {"id": req_id, "ok": True, "payload": result}
+            return {
+                "id": req_id,
+                "ok": False,
+                "error": result.get("message", "Failed to open Flownex"),
+            }
+
+        if typ == "flownex.open_project":
+            result = _fb.open_project()
+            if result.get("ok"):
+                return {"id": req_id, "ok": True, "payload": result}
+            return {
+                "id": req_id,
+                "ok": False,
+                "error": result.get("message", "Failed to open project"),
+            }
+
+        if typ == "flownex.close_project":
+            result = _fb.close_project()
+            if result.get("ok"):
+                return {"id": req_id, "ok": True, "payload": result}
+            return {
+                "id": req_id,
+                "ok": False,
+                "error": result.get("message", "Failed to close project"),
+            }
+
+        if typ == "flownex.close_app":
+            result = _fb.exit_app()
+            if result.get("ok"):
+                return {"id": req_id, "ok": True, "payload": result}
+            return {
+                "id": req_id,
+                "ok": False,
+                "error": result.get("message", "Failed to close application"),
+            }
+
+        if typ == "flownex.get_input_values":
+            return {"id": req_id, "ok": True, "payload": _fb.get_input_values()}
+
+        if typ == "flownex.get_state_snapshot":
+            return {"id": req_id, "ok": True, "payload": _fb.get_state_snapshot()}
+
+        if typ == "flownex.set_input_value":
+            scope = payload.get("scope", "")
+            key = payload.get("key", "")
+            value = payload.get("value")
+            result = _fb.set_input_value(scope, key, value)
+            if result.get("ok"):
+                return {"id": req_id, "ok": True, "payload": result}
+            return {
+                "id": req_id,
+                "ok": False,
+                "error": result.get("message", "Failed to set input value"),
+            }
+
+        if typ == "flownex.load_defaults":
+            result = _fb.load_defaults()
+            if result.get("ok"):
+                return {"id": req_id, "ok": True, "payload": result}
+            return {
+                "id": req_id,
+                "ok": False,
+                "error": result.get("message", "Failed to load defaults"),
+            }
+
+        if typ == "flownex.run_steady":
+            result = _fb.run_steady()
+            if result.get("ok"):
+                return {"id": req_id, "ok": True, "payload": result}
+            return {
+                "id": req_id,
+                "ok": False,
+                "error": result.get("message", "Failed to run steady-state simulation"),
+            }
+
+        if typ == "flownex.load_defaults_and_run_steady":
+            result = _fb.load_defaults_and_run_steady()
+            if result.get("ok"):
+                return {"id": req_id, "ok": True, "payload": result}
+            return {
+                "id": req_id,
+                "ok": False,
+                "error": result.get(
+                    "message",
+                    "Failed to load defaults and run steady-state simulation",
+                ),
+            }
+
+        if typ == "flownex.start_transient":
+            result = _fb.start_transient()
+            if result.get("ok"):
+                return {"id": req_id, "ok": True, "payload": result}
+            return {
+                "id": req_id,
+                "ok": False,
+                "error": result.get("message", "Failed to start transient simulation"),
+            }
+
+        if typ == "flownex.stop_transient":
+            result = _fb.stop_transient()
+            if result.get("ok"):
+                return {"id": req_id, "ok": True, "payload": result}
+            return {
+                "id": req_id,
+                "ok": False,
+                "error": result.get("message", "Failed to stop transient simulation"),
+            }
+
+        if typ == "flownex.read_outputs":
+            result = _fb.read_outputs()
+            if result.get("ok"):
+                return {"id": req_id, "ok": True, "payload": result}
+            return {
+                "id": req_id,
+                "ok": False,
+                "error": result.get("message", "Failed to read outputs"),
+            }
+
         # -----------------------------------------------------------------
         # USD-dependent commands (active stage required)
         # -----------------------------------------------------------------
@@ -81,7 +206,7 @@ async def handle_ws_message(msg: str) -> dict:
             return {
                 "id": req_id,
                 "ok": True,
-                "payload": {"paths": paths}
+                "payload": {"paths": paths},
             }
 
         if typ == "usd.ping":
@@ -94,13 +219,21 @@ async def handle_ws_message(msg: str) -> dict:
 
         if typ == "usd.prim_exists":
             prim_path = payload.get("primPath", "")
-            return {"id": req_id, "ok": True, "payload": {"exists": _prim_exists(stage, prim_path)}}
+            return {
+                "id": req_id,
+                "ok": True,
+                "payload": {"exists": _prim_exists(stage, prim_path)},
+            }
 
         if typ == "usd.pick":
             norm_x = float(payload.get("x", 0.0))
             norm_y = float(payload.get("y", 0.0))
             prim_path = _pick_prim_path(norm_x, norm_y)
-            return {"id": req_id, "ok": True, "payload": {"primPath": prim_path or None}}
+            return {
+                "id": req_id,
+                "ok": True,
+                "payload": {"primPath": prim_path or None},
+            }
 
         if typ == "usd.list_children":
             prim_path = payload.get("primPath", "/World")
@@ -115,7 +248,6 @@ async def handle_ws_message(msg: str) -> dict:
                 return {"id": req_id, "ok": True, "payload": {"value": _json_safe(val)}}
             except RuntimeError as exc:
                 if "attribute not found" in str(exc).lower():
-                    # Return null value so callers show "not found" gracefully.
                     return {"id": req_id, "ok": True, "payload": {"value": None}}
                 raise
 
@@ -163,8 +295,8 @@ async def handle_ws_message(msg: str) -> dict:
             return {"id": req_id, **result}
 
         # -----------------------------------------------------------------
-        # Flownex controller metadata  (flownex.*)
-        # All handlers resolve the prim from payload["primPath"].
+        # Flownex controller metadata (flownex.*)
+        # All handlers below this point resolve the prim from payload["primPath"].
         # -----------------------------------------------------------------
         if typ.startswith("flownex."):
             prim_path = payload.get("primPath", "")
@@ -247,30 +379,59 @@ async def handle_ws_message(msg: str) -> dict:
                 cmd_id = _fx.enqueue_command(
                     prim,
                     payload.get("op", ""),
-                    args=payload.get("args"),
+                    args=payload.get("args", {}),
                 )
                 return {"id": req_id, "ok": True, "payload": {"cmdId": cmd_id}}
 
             if typ == "flownex.list_commands":
-                cmds = _fx.list_commands(prim, status=payload.get("status"))
+                status = payload.get("status")
+                cmds = _fx.list_commands(prim, status=status)
                 return {"id": req_id, "ok": True, "payload": {"commands": cmds}}
 
             if typ == "flownex.mark_command_status":
-                found = _fx.mark_command_status(
+                ok = _fx.mark_command_status(
                     prim,
                     payload.get("cmdId", ""),
-                    status=payload.get("status", "applied"),
+                    status=payload.get("status", "pending"),
                     error=payload.get("error"),
                 )
-                return {"id": req_id, "ok": True, "payload": {"found": found}}
+                return {"id": req_id, "ok": True, "payload": {"updated": ok}}
 
             if typ == "flownex.pop_next_pending_command":
                 cmd = _fx.pop_next_pending_command(prim)
                 return {"id": req_id, "ok": True, "payload": {"command": cmd}}
 
+            if typ == "flownex.load_parameter_table_rows":
+                rows = payload.get("rows", [])
+                meta = _fx.load_parameter_table_rows(prim, rows)
+                return {"id": req_id, "ok": True, "payload": {"meta": meta}}
+
+            if typ == "flownex.upsert_parameter_def":
+                meta = _fx.upsert_parameter_def(
+                    prim,
+                    key=payload.get("key", ""),
+                    description=payload.get("description", ""),
+                    componentIdentifier=payload.get("componentIdentifier", ""),
+                    propertyIdentifier=payload.get("propertyIdentifier", ""),
+                    unit=payload.get("unit", ""),
+                    defaultValue=payload.get("defaultValue"),
+                    value=payload.get("value"),
+                    minValue=payload.get("minValue"),
+                    maxValue=payload.get("maxValue"),
+                    step=payload.get("step"),
+                    group=payload.get("group"),
+                    editType=payload.get("editType"),
+                )
+                return {"id": req_id, "ok": True, "payload": {"meta": meta}}
+
             if typ == "flownex.get_parameters":
                 params = _fx.get_parameters(prim)
                 return {"id": req_id, "ok": True, "payload": {"parameters": params}}
+
+            if typ == "flownex.set_parameters":
+                params = payload.get("parameters", {})
+                meta = _fx.set_parameters(prim, params)
+                return {"id": req_id, "ok": True, "payload": {"meta": meta}}
 
             if typ == "flownex.set_parameter_value":
                 meta = _fx.set_parameter_value(
@@ -281,30 +442,36 @@ async def handle_ws_message(msg: str) -> dict:
                 return {"id": req_id, "ok": True, "payload": {"meta": meta}}
 
             if typ == "flownex.get_parameter_value":
-                val = _fx.get_parameter_value(prim, payload.get("key", ""))
-                return {"id": req_id, "ok": True, "payload": {"value": val}}
+                value = _fx.get_parameter_value(prim, payload.get("key", ""))
+                return {"id": req_id, "ok": True, "payload": {"value": value}}
 
-            if typ == "flownex.load_parameter_table_rows":
-                meta = _fx.load_parameter_table_rows(prim, payload.get("rows", []))
-                return {"id": req_id, "ok": True, "payload": {"meta": meta}}
-
-            if typ == "flownex.sync_parameters":
+            if typ == "flownex.sync_parameters_to_desired_properties":
                 meta = _fx.sync_parameters_to_desired_properties(prim)
                 return {"id": req_id, "ok": True, "payload": {"meta": meta}}
 
-            return {"id": req_id, "ok": False, "error": f"Unknown flownex type: {typ}"}
+            if typ == "flownex.deinstance_and_add":
+                root = payload.get("root", "/World")
+                msg_txt = _fat.deinstance_and_add_flownex(root=root)
+                return {"id": req_id, "ok": True, "payload": {"message": msg_txt}}
 
-        # -----------------------------------------------------------------
-        # Flownex stage-wide tools  (flownex_tools.*)
-        # These handlers do NOT require a primPath — they work on the whole
-        # stage (or a sub-tree) and delegate to flownex_attr_tools.
-        # -----------------------------------------------------------------
-        if typ == "flownex_tools.deinstance_and_add_flownex":
-            root = payload.get("root", "/World")
-            summary = _fat.deinstance_and_add_flownex(root)
-            return {"id": req_id, "ok": True, "payload": {"summary": summary}}
+            if typ == "flownex.map_outputs_to_prims":
+                io_dir = payload.get("ioDir", "")
+                outputs_filename = payload.get("outputsFilename", "Outputs.csv")
+                root = payload.get("root", "/World")
+                out_name = payload.get("outName", "FlownexMapping.json")
+                msg_txt, out_path = _fat.map_outputs_to_prims(
+                    io_dir=io_dir,
+                    outputs_filename=outputs_filename,
+                    root=root,
+                    out_name=out_name,
+                )
+                return {
+                    "id": req_id,
+                    "ok": True,
+                    "payload": {"message": msg_txt, "outPath": out_path},
+                }
 
-        return {"id": req_id, "ok": False, "error": f"Unknown type: {typ}"}
+        return {"id": req_id, "ok": False, "error": f"Unknown message type: {typ}"}
 
-    except Exception as e:
-        return {"id": req_id, "ok": False, "error": str(e)}
+    except Exception as exc:
+        return {"id": req_id, "ok": False, "error": str(exc)}
