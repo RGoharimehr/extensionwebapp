@@ -46,3 +46,8 @@ deps/**/user.toml
 !/source/extensions/
 !/source/extensions/omnicool.webapp/
 !/source/extensions/omnicool.webapp/**
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+*.pyo
