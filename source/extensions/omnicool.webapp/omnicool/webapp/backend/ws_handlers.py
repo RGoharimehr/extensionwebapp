@@ -295,6 +295,32 @@ async def handle_ws_message(msg: str) -> dict:
             return {"id": req_id, **result}
 
         # -----------------------------------------------------------------
+        # Flownex stage-wide operations (no specific prim path required)
+        # These must come BEFORE the prim-validated flownex.* block below.
+        # -----------------------------------------------------------------
+        if typ == "flownex.deinstance_and_add":
+            root = payload.get("root", "/World")
+            msg_txt = _fat.deinstance_and_add_flownex(root=root)
+            return {"id": req_id, "ok": True, "payload": {"message": msg_txt}}
+
+        if typ == "flownex.map_outputs_to_prims":
+            io_dir = payload.get("ioDir", "")
+            outputs_filename = payload.get("outputsFilename", "Outputs.csv")
+            root = payload.get("root", "/World")
+            out_name = payload.get("outName", "FlownexMapping.json")
+            msg_txt, out_path = _fat.map_outputs_to_prims(
+                io_dir=io_dir,
+                outputs_filename=outputs_filename,
+                root=root,
+                out_name=out_name,
+            )
+            return {
+                "id": req_id,
+                "ok": True,
+                "payload": {"message": msg_txt, "outPath": out_path},
+            }
+
+        # -----------------------------------------------------------------
         # Flownex controller metadata (flownex.*)
         # All handlers below this point resolve the prim from payload["primPath"].
         # -----------------------------------------------------------------
@@ -448,28 +474,6 @@ async def handle_ws_message(msg: str) -> dict:
             if typ == "flownex.sync_parameters_to_desired_properties":
                 meta = _fx.sync_parameters_to_desired_properties(prim)
                 return {"id": req_id, "ok": True, "payload": {"meta": meta}}
-
-            if typ == "flownex.deinstance_and_add":
-                root = payload.get("root", "/World")
-                msg_txt = _fat.deinstance_and_add_flownex(root=root)
-                return {"id": req_id, "ok": True, "payload": {"message": msg_txt}}
-
-            if typ == "flownex.map_outputs_to_prims":
-                io_dir = payload.get("ioDir", "")
-                outputs_filename = payload.get("outputsFilename", "Outputs.csv")
-                root = payload.get("root", "/World")
-                out_name = payload.get("outName", "FlownexMapping.json")
-                msg_txt, out_path = _fat.map_outputs_to_prims(
-                    io_dir=io_dir,
-                    outputs_filename=outputs_filename,
-                    root=root,
-                    out_name=out_name,
-                )
-                return {
-                    "id": req_id,
-                    "ok": True,
-                    "payload": {"message": msg_txt, "outPath": out_path},
-                }
 
         return {"id": req_id, "ok": False, "error": f"Unknown message type: {typ}"}
 

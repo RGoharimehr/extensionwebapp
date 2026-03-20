@@ -63,3 +63,31 @@ async def _ensure_aiohttp_installed():
             f"Combined bridge server will NOT start. Error: {e}"
         )
         raise
+
+
+async def _ensure_aiortc_installed():
+    """
+    Ensures the ``aiortc`` library is available, installing it via
+    ``omni.kit.pipapi`` on first use if necessary.
+
+    ``aiortc`` is optional — if it cannot be installed the WebRTC signaling
+    endpoint will respond with HTTP 501 and log a warning, but the WebSocket
+    bridge continues to function normally.
+    """
+    try:
+        import aiortc  # noqa: F401
+        return
+    except Exception:
+        pass
+
+    try:
+        import omni.kit.pipapi as pipapi
+        carb.log_warn("[omnicool.webapp][webrtc] 'aiortc' not found. Installing via pip...")
+        pipapi.install("aiortc")
+        import aiortc  # noqa: F401
+        carb.log_info("[omnicool.webapp][webrtc] 'aiortc' installed successfully.")
+    except Exception as e:
+        carb.log_warn(
+            "[omnicool.webapp][webrtc] Could not install 'aiortc'. "
+            f"WebRTC will not be available; WS bridge is unaffected. Error: {e}"
+        )

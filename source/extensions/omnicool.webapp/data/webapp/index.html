@@ -210,7 +210,34 @@
       function _patchBrowseButtons() {
         document.querySelectorAll('button').forEach(function (btn) {
           if (_browseBtnsPatched.has(btn)) return;
-          if (btn.textContent.trim() !== '...') return;
+          var label = btn.textContent.trim();
+
+          /* ── Hide Browse "..." and "Browse..." buttons ──────────────── */
+          if (label === '...' || label === 'Browse...') {
+            _browseBtnsPatched.add(btn);
+            btn.style.display = 'none';
+            /* Also widen the sibling text-input so there's no gap. */
+            var row = btn.closest ? btn.closest('div') : btn.parentNode;
+            if (row) {
+              var inp = row.querySelector ? row.querySelector('input[type="text"]') : null;
+              if (inp) inp.style.flex = '1';
+            }
+            return;
+          }
+
+          /* ── Hide redundant buttons (keep one of each duplicate pair) ── *
+           * "Open Flownex" is superseded by "Open Project" (open_project    *
+           * implicitly ensures Flownex is running). "Close Flownex" shuts   *
+           * down the whole app; "Close Project" is the safer action exposed  *
+           * to the user. Hide the more destructive / redundant one.          */
+          if (label === 'Open Flownex' || label === 'Close Flownex') {
+            _browseBtnsPatched.add(btn);
+            btn.style.display = 'none';
+            return;
+          }
+
+          /* Original server-browse path-interception for any remaining
+             "..." buttons that were NOT hidden above (fallback). */
           var row = btn.closest ? btn.closest('div') : btn.parentNode;
           if (!row) return;
           var sibling = row.querySelector ? row.querySelector('input[type="text"]') : null;

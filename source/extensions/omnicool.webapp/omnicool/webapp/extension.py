@@ -16,6 +16,7 @@ from omnicool.webapp.backend.ws_handlers import handle_ws_message
 from omnicool.webapp.transport.http_server import (
     _StaticHandler,
     _ensure_aiohttp_installed,
+    _ensure_aiortc_installed,
     _ensure_websockets_installed,
 )
 from omnicool.webapp.transport.webrtc_server import WebRTCSignalingServer
@@ -210,6 +211,7 @@ class OmnicoolWebAppExt(omni.ext.IExt):
             runner = None
             try:
                 await _ensure_aiohttp_installed()
+                await _ensure_aiortc_installed()
                 import aiohttp
                 import aiohttp.web as web
 
@@ -280,12 +282,17 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                         return web.Response(
                             status=501,
                             text="aiortc is not installed; WebRTC unavailable.",
+                            headers=_CORS_HEADERS,
                         )
 
                     try:
                         body = await request.json()
                     except Exception:
-                        return web.Response(status=400, text="Request body must be valid JSON")
+                        return web.Response(
+                            status=400,
+                            text="Request body must be valid JSON",
+                            headers=_CORS_HEADERS,
+                        )
 
                     sdp = body.get("sdp")
                     sdp_type = body.get("type", "offer")
@@ -293,6 +300,7 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                         return web.Response(
                             status=400,
                             text="'sdp' and 'type': 'offer' are required",
+                            headers=_CORS_HEADERS,
                         )
 
                     pc = RTCPeerConnection()
