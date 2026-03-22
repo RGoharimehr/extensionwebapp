@@ -11,10 +11,12 @@ import omni.kit.app
 import carb
 
 from omnicool.webapp.backend.bridge_ws_handlers import (
+    apply_saved_config,
     handle_bridge_connect,
     handle_bridge_message,
     set_browse_callback,
 )
+from omnicool.webapp.backend import config_store
 from omnicool.webapp.backend.usd_helpers import _get_attr, _pick_prim_path
 from omnicool.webapp.backend.ws_handlers import handle_ws_message
 from omnicool.webapp.transport.http_server import (
@@ -68,6 +70,11 @@ class OmnicoolWebAppExt(omni.ext.IExt):
         mgr = omni.kit.app.get_app().get_extension_manager()
         ext_path = mgr.get_extension_path(ext_id)
         self._web_root = os.path.join(ext_path, self._web_root_rel)
+
+        # Point the config store at the extension's data directory and restore
+        # any previously saved project / IO paths into the Flownex IO layer.
+        config_store.set_path(os.path.join(ext_path, "data", "omnicool_config.json"))
+        apply_saved_config()
 
         carb.log_info(f"[omnicool.webapp] web_root={self._web_root}")
         carb.log_info(f"[omnicool.webapp] http=http://{self._host}:{self._port}")

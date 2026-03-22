@@ -5,6 +5,7 @@ import json
 import logging
 from typing import Any, Callable, Coroutine, Dict, Optional, Set
 
+from omnicool.webapp.backend import config_store
 from omnicool.webapp.backend import flownex_bridge as _fb
 
 log = logging.getLogger(__name__)
@@ -229,6 +230,26 @@ async def handle_bridge_message(msg: str, websocket: Any) -> None:
             io_dir = str(payload.get("ioDir", "") or "")
             backend = str(payload.get("backend", "flownex") or "flownex")
 
+            # Persist whatever the user provided to the JSON config file so
+            # the values survive an extension restart regardless of whether
+            # the Flownex runtime is available right now.
+            save_patch: Dict[str, Any] = {}
+            if project_path:
+                save_patch["projectFile"] = project_path
+            if io_dir:
+                save_patch["ioDirectory"] = io_dir
+            if "solveOnChange" in payload:
+                save_patch["solveOnChange"] = bool(payload.get("solveOnChange"))
+            if "resultPollingInterval" in payload:
+                try:
+                    save_patch["resultPollingInterval"] = float(
+                        payload.get("resultPollingInterval") or 1.0
+                    )
+                except (TypeError, ValueError):
+                    pass
+            if save_patch:
+                config_store.save(save_patch)
+
             patch: Dict[str, Any] = {}
             if project_path:
                 patch["flownexProject"] = project_path
@@ -451,6 +472,15 @@ async def handle_bridge_message(msg: str, websocket: Any) -> None:
             project_path = str(payload.get("projectPath", "") or "")
             io_dir = str(payload.get("ioDir", "") or "")
 
+            # Persist the paths to JSON for cross-session recovery.
+            save_patch = {}
+            if project_path:
+                save_patch["projectFile"] = project_path
+            if io_dir:
+                save_patch["ioDirectory"] = io_dir
+            if save_patch:
+                config_store.save(save_patch)
+
             patch = {}
             if project_path:
                 patch["flownexProject"] = project_path
@@ -503,3 +533,30 @@ async def handle_bridge_message(msg: str, websocket: Any) -> None:
             await websocket.send(_status_json("error", str(exc), 0.0))
         except Exception:
             pass
+
+
+def apply_saved_config() -> None:
+    """Apply the persisted JSON config to flownex_bridge (best effort).
+
+    Called at extension startup so that the saved project path and IO
+    directory are pre-loaded into the FlownexIO configuration object as soon
+    as possible.  If the Flownex runtime is not available the call silently
+    does nothing; the user will need to click *Apply Configure* once Flownex
+    is running.
+    """
+    saved = config_store.load()
+    patch: Dict[str, Any] = {}
+    if saved.get("projectFile"):
+        patch["flownexProject"] = saved["projectFile"]
+    if saved.get("ioDirectory"):
+        patch["ioFileDirectory"] = saved["ioDirectory"]
+    if "solveOnChange" in saved:
+        patch["solveOnChange"] = saved["solveOnChange"]
+    if "resultPollingInterval" in saved:
+        patch["resultPollingInterval"] = saved["resultPollingInterval"]
+    if patch:
+        try:
+            _fb.set_config(patch)
+            log.info("[bridge_ws] applied saved config from JSON: %s", list(patch.keys()))
+        except Exception as exc:  # noqa: BLE001
+            log.debug("[bridge_ws] apply_saved_config: %s", exc)

@@ -207,6 +207,39 @@
       }
 
       var _browseBtnsPatched = new WeakSet();
+      var _sectionTitlesToHide = ['Layout Configuration', 'Custom Extensions'];
+      var _hiddenSectionNodes = new WeakSet();
+
+      function _hideUnwantedSections() {
+        /* Walk text nodes in the document.  When a text node's trimmed content
+           exactly matches one of our target section titles, walk up the DOM to
+           find the nearest ancestor that contains more than just the title text
+           (i.e. includes the section body too) and hide it.  The WeakSet guard
+           means each element is only hidden once, avoiding infinite loops. */
+        var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+        var node;
+        while ((node = walker.nextNode())) {
+          var txt = node.textContent.trim();
+          if (_sectionTitlesToHide.indexOf(txt) === -1) continue;
+          var el = node.parentElement;
+          while (el && el !== document.body) {
+            var par = el.parentElement;
+            if (!par || par === document.body) break;
+            /* Stop at the first ancestor that wraps both the heading and the
+               section body (more text than just the title, or has siblings). */
+            var hasBody = el.textContent.trim().length > txt.length + 5;
+            var hasSiblings = par.children.length > 1;
+            if (hasBody || hasSiblings) {
+              if (!_hiddenSectionNodes.has(el)) {
+                _hiddenSectionNodes.add(el);
+                el.style.display = 'none';
+              }
+              break;
+            }
+            el = par;
+          }
+        }
+      }
       function _patchBrowseButtons() {
         document.querySelectorAll('button').forEach(function (btn) {
           if (_browseBtnsPatched.has(btn)) return;
@@ -273,6 +306,7 @@
         _patchBridgeAPI();
         _tryRestorePaths();
         _patchBrowseButtons();
+        _hideUnwantedSections();
       }).observe(document.documentElement, { childList: true, subtree: true });
 
       /* Must run before the deferred React bundle connects to the bridge WS */
