@@ -194,7 +194,9 @@ class OmnicoolWebAppExt(omni.ext.IExt):
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _run_dialog)
 
-
+    # -----------------
+    # WebSocket USD bridge
+    # -----------------
     def _start_ws(self):
         if self._ws_task:
             return
