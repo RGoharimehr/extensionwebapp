@@ -561,3 +561,146 @@ class TestFlownexBridge(omni.kit.test.AsyncTestCase):
         api = _MockApi()
         fb.reset_singletons(api=api, io=None)
         json.dumps(fb.run_steady())  # must not raise
+
+    # ------------------------------------------------------------------
+    # _normalize_output_value
+    # ------------------------------------------------------------------
+
+    async def test_normalize_output_value_none_returns_none(self):
+        self.assertIsNone(fb._normalize_output_value(None))
+
+    async def test_normalize_output_value_float_passthrough(self):
+        self.assertAlmostEqual(fb._normalize_output_value(3.14), 3.14)
+
+    async def test_normalize_output_value_int_converts_to_float(self):
+        result = fb._normalize_output_value(42)
+        self.assertIsInstance(result, float)
+        self.assertAlmostEqual(result, 42.0)
+
+    async def test_normalize_output_value_numeric_string(self):
+        self.assertAlmostEqual(fb._normalize_output_value("3.14"), 3.14)
+
+    async def test_normalize_output_value_empty_string_returns_none(self):
+        self.assertIsNone(fb._normalize_output_value(""))
+
+    async def test_normalize_output_value_vendor_error_string_returns_none(self):
+        """Vendor GetPropertyValueUnit returns error strings instead of None."""
+        error_str = "Error parsing property value: unknown unit group Pa :Pipe1.{Flow}Pressure"
+        self.assertIsNone(fb._normalize_output_value(error_str))
+
+    async def test_normalize_output_value_nan_returns_none(self):
+        self.assertIsNone(fb._normalize_output_value(float("nan")))
+
+    async def test_normalize_output_value_non_numeric_returns_none(self):
+        self.assertIsNone(fb._normalize_output_value("not_a_number"))
+
+    # ------------------------------------------------------------------
+    # _read_output_from_definition: vendor error-string normalization
+    # ------------------------------------------------------------------
+
+    async def test_read_output_vendor_error_string_returns_none(self):
+        """Vendor returns an error message string instead of a float → None."""
+        class _VendorReturnsErrorStr:
+            AttachedProject = object()
+            def GetPropertyValueUnit(self, comp, prop, unit):
+                return "Error parsing property value: unknown unit group Pa :Pipe1.P"
+            def GetPropertyValue(self, comp, prop):
+                return "Error getting property value: no value returned for Pipe1.P"
+
+        fb.reset_singletons(api=_VendorReturnsErrorStr(), io=None)
+        defn = {"componentIdentifier": "Pipe1", "propertyIdentifier": "P", "unit": "Pa"}
+        result = fb._read_output_from_definition(defn)
+        self.assertIsNone(result)
+
+    async def test_read_output_vendor_numeric_string_returns_float(self):
+        """Vendor returns a numeric string via GetPropertyValue → float."""
+        class _VendorReturnsStr:
+            AttachedProject = object()
+            def GetPropertyValue(self, comp, prop): return "42.0"
+            def GetPropertyValueUnit(self, comp, prop, unit): return 42.0
+
+        fb.reset_singletons(api=_VendorReturnsStr(), io=None)
+        defn = {"componentIdentifier": "C", "propertyIdentifier": "P", "unit": ""}
+        result = fb._read_output_from_definition(defn)
+        self.assertAlmostEqual(result, 42.0)
+
+    async def test_read_output_vendor_exception_returns_none(self):
+        """Vendor raises an exception → None, does not propagate."""
+        class _VendorRaises:
+            AttachedProject = object()
+            def GetPropertyValueUnit(self, comp, prop, unit): raise RuntimeError("vendor crash")
+            def GetPropertyValue(self, comp, prop): raise RuntimeError("vendor crash")
+
+        fb.reset_singletons(api=_VendorRaises(), io=None)
+        defn = {"componentIdentifier": "C", "propertyIdentifier": "P", "unit": "Pa"}
+        result = fb._read_output_from_definition(defn)
+        self.assertIsNone(result)
+
+    # ------------------------------------------------------------------
+    # read_outputs: per-output isolation
+    # ------------------------------------------------------------------
+
+    async def test_read_outputs_one_bad_output_does_not_prevent_others(self):
+        """A crashing output key should yield None, not crash the whole read."""
+        class _MixedApi:
+            AttachedProject = object()
+            def GetPropertyValueUnit(self, comp, prop, unit):
+                if comp == "Bad":
+                    raise RuntimeError("vendor crash for Bad")
+                return 10.0
+            def GetPropertyValue(self, comp, prop): return "5.0"
+
+        fb.reset_singletons(api=_MixedApi(), io=None)
+        fb._output_defs.clear()
+        fb._output_defs["good"] = {
+            "key": "good", "componentIdentifier": "Good",
+            "propertyIdentifier": "P", "unit": "Pa",
+            "description": "", "category": "",
+        }
+        fb._output_defs["bad"] = {
+            "key": "bad", "componentIdentifier": "Bad",
+            "propertyIdentifier": "P", "unit": "Pa",
+            "description": "", "category": "",
+        }
+
+        result = fb.read_outputs()
+        self.assertTrue(result["ok"])
+        self.assertAlmostEqual(result["outputs"]["good"], 10.0)
+        self.assertIsNone(result["outputs"]["bad"])
+
+    async def test_read_outputs_result_is_json_serializable_with_none_values(self):
+        """read_outputs must return JSON-serializable data even when outputs are None."""
+        class _NoneApi:
+            AttachedProject = object()
+            def GetPropertyValueUnit(self, comp, prop, unit): return None
+            def GetPropertyValue(self, comp, prop): return None
+
+        fb.reset_singletons(api=_NoneApi(), io=None)
+        fb._output_defs.clear()
+        fb._output_defs["out1"] = {
+            "key": "out1", "componentIdentifier": "C", "propertyIdentifier": "P",
+            "unit": "Pa", "description": "", "category": "",
+        }
+
+        result = fb.read_outputs()
+        json.dumps(result)  # must not raise
+
+    async def test_read_outputs_vendor_error_string_does_not_propagate(self):
+        """Vendor error string in output must not propagate to the broadcast."""
+        class _VendorErrorApi:
+            AttachedProject = object()
+            def GetPropertyValueUnit(self, comp, prop, unit):
+                return "Error parsing property value: unknown unit group kPa :C.P"
+            def GetPropertyValue(self, comp, prop): return "3.14"
+
+        fb.reset_singletons(api=_VendorErrorApi(), io=None)
+        fb._output_defs.clear()
+        fb._output_defs["out1"] = {
+            "key": "out1", "componentIdentifier": "C", "propertyIdentifier": "P",
+            "unit": "kPa", "description": "", "category": "",
+        }
+
+        result = fb.read_outputs()
+        self.assertTrue(result["ok"])
+        self.assertIsNone(result["outputs"]["out1"])
+        json.dumps(result)  # must not raise

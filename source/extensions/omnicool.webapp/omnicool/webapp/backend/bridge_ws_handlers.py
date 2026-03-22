@@ -132,12 +132,15 @@ async def _broadcast_outputs(values: Dict[str, Any]) -> None:
 
 async def _poll_outputs_loop() -> None:
     global _poll_task
+    _consecutive_errors: int = 0
+    _MAX_CONSECUTIVE_ERRORS: int = 5
     try:
         while _fb.is_transient_running():
             await asyncio.sleep(_fb.get_poll_interval())
 
             result = _fb.read_outputs()
             if result.get("ok"):
+                _consecutive_errors = 0
                 await _broadcast_outputs(result.get("outputs", {}))
 
                 usd_sync = result.get("usdSync") or {}
@@ -148,12 +151,31 @@ async def _poll_outputs_loop() -> None:
                         0.0,
                     ))
             else:
+                _consecutive_errors += 1
+                log.warning(
+                    "[bridge_ws] poll cycle error (%d/%d): %s",
+                    _consecutive_errors,
+                    _MAX_CONSECUTIVE_ERRORS,
+                    result.get("message", "Unknown error"),
+                )
                 await _broadcast(_status_json(
-                    "error",
-                    result.get("message", "Failed to poll outputs."),
+                    "running",
+                    f"Poll error ({_consecutive_errors}/{_MAX_CONSECUTIVE_ERRORS}): "
+                    + result.get("message", "Failed to poll outputs."),
                     0.0,
                 ))
-                break
+                if _consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
+                    log.warning(
+                        "[bridge_ws] stopping transient poll after %d consecutive errors.",
+                        _consecutive_errors,
+                    )
+                    await _broadcast(_status_json(
+                        "error",
+                        f"Transient polling stopped after {_consecutive_errors} consecutive errors: "
+                        + result.get("message", ""),
+                        0.0,
+                    ))
+                    break
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001

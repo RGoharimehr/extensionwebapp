@@ -58,7 +58,7 @@ class OmnicoolWebAppExt(omni.ext.IExt):
         self._ws_host = str(settings.get(f"{base}/wsHost") or "127.0.0.1")
         self._ws_port = int(settings.get(f"{base}/wsPort") or 8899)
 
-        # The React webapp hard-codes ws://127.0.0.1:8001/ws for its bridge.
+        # The React webapp connects to ws://127.0.0.1:8001 (root path) for its bridge.
         self._bridge_ws_host = str(settings.get(f"{base}/bridgeWsHost") or "127.0.0.1")
         self._bridge_ws_port = int(settings.get(f"{base}/bridgeWsPort") or 8001)
 
