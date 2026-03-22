@@ -211,32 +211,31 @@
       var _hiddenSectionNodes = new WeakSet();
 
       function _hideUnwantedSections() {
-        /* Walk text nodes in the document.  When a text node's trimmed content
-           exactly matches one of our target section titles, walk up the DOM to
-           find the nearest ancestor that contains more than just the title text
-           (i.e. includes the section body too) and hide it.  The WeakSet guard
-           means each element is only hidden once, avoiding infinite loops. */
+        /* Walk text nodes.  For each node whose trimmed text exactly matches a
+           target title, climb the DOM until we reach an ancestor whose total
+           text content is substantially longer than the title alone — meaning
+           that ancestor wraps both the heading and the section body.  We then
+           hide that ancestor with !important so React CSS cannot override it.
+           The WeakSet guard prevents the same node being processed twice. */
         var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
         var node;
         while ((node = walker.nextNode())) {
           var txt = node.textContent.trim();
           if (_sectionTitlesToHide.indexOf(txt) === -1) continue;
+          /* Title length without whitespace — used as baseline. */
+          var titleLen = txt.replace(/\s+/g, '').length;
           var el = node.parentElement;
           while (el && el !== document.body) {
-            var par = el.parentElement;
-            if (!par || par === document.body) break;
-            /* Stop at the first ancestor that wraps both the heading and the
-               section body (more text than just the title, or has siblings). */
-            var hasBody = el.textContent.trim().length > txt.length + 5;
-            var hasSiblings = par.children.length > 1;
-            if (hasBody || hasSiblings) {
-              if (!_hiddenSectionNodes.has(el)) {
-                _hiddenSectionNodes.add(el);
-                el.style.display = 'none';
-              }
-              break;
-            }
-            el = par;
+            /* Once the element's stripped content is noticeably longer than
+               the title text alone, it must contain body content too — this
+               is the section wrapper we want to hide. */
+            if (el.textContent.replace(/\s+/g, '').length > titleLen + 20) break;
+            if (!el.parentElement || el.parentElement === document.body) break;
+            el = el.parentElement;
+          }
+          if (el && el !== document.body && !_hiddenSectionNodes.has(el)) {
+            _hiddenSectionNodes.add(el);
+            el.style.setProperty('display', 'none', 'important');
           }
         }
       }
@@ -248,7 +247,7 @@
           /* ── Hide Browse "..." and "Browse..." buttons ──────────────── */
           if (label === '...' || label === 'Browse...') {
             _browseBtnsPatched.add(btn);
-            btn.style.display = 'none';
+            btn.style.setProperty('display', 'none', 'important');
             /* Also widen the sibling text-input so there's no gap. */
             var row = btn.closest ? btn.closest('div') : btn.parentNode;
             if (row) {
@@ -265,7 +264,7 @@
            * to the user. Hide the more destructive / redundant one.          */
           if (label === 'Open Flownex' || label === 'Close Flownex') {
             _browseBtnsPatched.add(btn);
-            btn.style.display = 'none';
+            btn.style.setProperty('display', 'none', 'important');
             return;
           }
 
