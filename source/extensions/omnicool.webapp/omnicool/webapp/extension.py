@@ -21,7 +21,6 @@ from omnicool.webapp.transport.http_server import (
     _StaticHandler,
     _ensure_aiohttp_installed,
     _ensure_aiortc_installed,
-    _ensure_websockets_installed,
 )
 from omnicool.webapp.transport.webrtc_server import WebRTCSignalingServer
 
@@ -202,22 +201,40 @@ class OmnicoolWebAppExt(omni.ext.IExt):
             return
 
         async def _run():
+            runner = None
             try:
-                await _ensure_websockets_installed()
-                import websockets
+                await _ensure_aiohttp_installed()
+                import aiohttp
+                import aiohttp.web as web
 
-                async def handler(websocket):
+                async def ws_handler(request):
+                    ws = web.WebSocketResponse()
+                    await ws.prepare(request)
                     carb.log_info("[omnicool.webapp][ws] client connected")
                     try:
-                        async for msg in websocket:
-                            resp = await handle_ws_message(msg)
-                            await websocket.send(json.dumps(resp))
+                        async for msg in ws:
+                            if msg.type == aiohttp.WSMsgType.TEXT:
+                                resp = await handle_ws_message(msg.data)
+                                await ws.send_str(json.dumps(resp))
+                            elif msg.type in (
+                                aiohttp.WSMsgType.ERROR,
+                                aiohttp.WSMsgType.CLOSE,
+                            ):
+                                break
                     except Exception as e:
                         carb.log_warn(f"[omnicool.webapp][ws] client handler ended: {e}")
                     finally:
                         carb.log_info("[omnicool.webapp][ws] client disconnected")
+                    return ws
 
-                self._ws_server = await websockets.serve(handler, self._ws_host, self._ws_port)
+                app = web.Application()
+                app.router.add_get("/", ws_handler)
+                runner = web.AppRunner(app)
+                await runner.setup()
+                site = web.TCPSite(runner, self._ws_host, self._ws_port)
+                await site.start()
+                self._ws_server = runner
+
                 carb.log_info(f"[omnicool.webapp][ws] Serving ws://{self._ws_host}:{self._ws_port}")
 
                 # Keep alive until cancelled
@@ -226,6 +243,13 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                 pass
             except Exception as e:
                 carb.log_error(f"[omnicool.webapp][ws] server failed: {e}")
+            finally:
+                if runner:
+                    try:
+                        await runner.cleanup()
+                    except Exception:
+                        pass
+                self._ws_server = None
 
         loop = asyncio.get_event_loop()
         self._ws_task = loop.create_task(_run())
@@ -237,13 +261,8 @@ class OmnicoolWebAppExt(omni.ext.IExt):
             except Exception:
                 pass
             self._ws_task = None
-
-        if self._ws_server:
-            try:
-                self._ws_server.close()
-            except Exception:
-                pass
-            self._ws_server = None
+        # self._ws_server (AppRunner) is cleaned up in the task's finally block.
+        self._ws_server = None
 
     # -----------------
     # Bridge WebSocket + WebRTC signaling (port 8001)
