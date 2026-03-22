@@ -573,8 +573,17 @@ def load_outputs() -> List[Dict[str, Any]]:
 
 
 def get_schema() -> Dict[str, Any]:
+    dyn = load_inputs() or []
+    sta = load_static_inputs() or []
+    # Tag each input definition with its scope so the frontend can send the
+    # correct scope when calling set_input.  We do this in our wrapper layer
+    # (not in the vendor definitions) to avoid modifying vendor files.
+    for d in dyn:
+        d["scope"] = "dynamic"
+    for d in sta:
+        d["scope"] = "static"
     return {
-        "inputs": (load_inputs() or []) + (load_static_inputs() or []),
+        "inputs": dyn + sta,
         "outputs": load_outputs() or [],
     }
 

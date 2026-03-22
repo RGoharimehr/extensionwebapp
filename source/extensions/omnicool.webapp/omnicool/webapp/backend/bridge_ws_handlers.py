@@ -366,6 +366,29 @@ async def handle_bridge_message(msg: str, websocket: Any) -> None:
                     0.0,
                 ))
 
+        elif typ == "load_defaults":
+            # Load default input values from vendor IO definitions without
+            # running a simulation.  Broadcasts inputs_delta for each key so
+            # the frontend sliders snap to their defaults.
+            result = _fb.load_defaults()
+            await websocket.send(_status_json(
+                "idle" if result.get("ok") else "error",
+                result.get("message", "Loaded default inputs."),
+                1.0 if result.get("ok") else 0.0,
+            ))
+            if result.get("ok"):
+                for scope, values in (result.get("inputs") or {}).items():
+                    for key, value in (values or {}).items():
+                        await websocket.send(json.dumps({
+                            "type": "inputs_delta",
+                            "payload": {
+                                "scope": scope,
+                                "key": key,
+                                "value": value,
+                            },
+                        }))
+            await websocket.send(_state_json())
+
         elif typ == "load_defaults_and_run_steady":
             await websocket.send(_status_json(
                 "running",
