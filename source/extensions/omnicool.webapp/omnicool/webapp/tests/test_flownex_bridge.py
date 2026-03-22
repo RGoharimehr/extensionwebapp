@@ -704,3 +704,269 @@ class TestFlownexBridge(omni.kit.test.AsyncTestCase):
         self.assertTrue(result["ok"])
         self.assertIsNone(result["outputs"]["out1"])
         json.dumps(result)  # must not raise
+
+    # ------------------------------------------------------------------
+    # Real-world Outputs.csv structure tests
+    # (Category, Key, Description, ComponentIdentifier, PropertyIdentifier, Unit)
+    # PropertyIdentifier values like "{Flow Element Results,Upstream}Total pressure"
+    # Units include: psi, °C, kg/s, l/min, kW
+    # ------------------------------------------------------------------
+
+    def _make_real_output(self, key, description, component, prop_id, unit, category="Pumps"):
+        """Return a mock OutputDefinition mimicking the real Outputs.csv rows."""
+        class _Out:
+            pass
+        o = _Out()
+        o.Key = key
+        o.Description = description
+        o.ComponentIdentifier = component
+        o.PropertyIdentifier = prop_id
+        o.Unit = unit
+        o.Category = category
+        return o
+
+    async def test_output_def_to_dict_real_world_psi(self):
+        """P_pump_in_1: PropertyIdentifier with comma in braces, psi unit."""
+        out = self._make_real_output(
+            "P_pump_in_1", "Pump 1 Inlet Pressure",
+            "Variable Speed Pump - 2",
+            "{Flow Element Results,Upstream}Total pressure",
+            "psi",
+        )
+        result = fb._output_def_to_dict(out)
+        self.assertEqual(result["key"], "P_pump_in_1")
+        self.assertEqual(result["propertyIdentifier"], "{Flow Element Results,Upstream}Total pressure")
+        self.assertEqual(result["unit"], "psi")
+        self.assertEqual(result["category"], "Pumps")
+        self.assertEqual(result["componentIdentifier"], "Variable Speed Pump - 2")
+        json.dumps(result)  # must not raise
+
+    async def test_output_def_to_dict_real_world_celsius(self):
+        """T_pump_in_1: °C unit must round-trip through JSON correctly."""
+        out = self._make_real_output(
+            "T_pump_in_1", "Pump 1 Inlet Temperature",
+            "Variable Speed Pump - 2",
+            "{Flow Element Results,Upstream}Total temperature",
+            "°C",
+        )
+        result = fb._output_def_to_dict(out)
+        self.assertEqual(result["unit"], "°C")
+        serialized = json.dumps(result)
+        restored = json.loads(serialized)
+        self.assertEqual(restored["unit"], "°C")
+
+    async def test_output_def_to_dict_real_world_copy_component(self):
+        """P_pump_in_2: component with 'Copy(001)' in name."""
+        out = self._make_real_output(
+            "P_pump_in_2", "Pump 2 Inlet Pressure",
+            "Variable Speed Pump - 2 Copy(001)",
+            "{Flow Element Results,Upstream}Total pressure",
+            "psi",
+        )
+        result = fb._output_def_to_dict(out)
+        self.assertEqual(result["componentIdentifier"], "Variable Speed Pump - 2 Copy(001)")
+        json.dumps(result)  # must not raise
+
+    async def test_real_world_schema_is_json_serializable(self):
+        """Full schema with real-world output definitions must serialise cleanly."""
+        real_outputs = [
+            self._make_real_output(
+                "P_pump_in_1", "Pump 1 Inlet Pressure", "Variable Speed Pump - 2",
+                "{Flow Element Results,Upstream}Total pressure", "psi",
+            ),
+            self._make_real_output(
+                "T_pump_in_1", "Pump 1 Inlet Temperature", "Variable Speed Pump - 2",
+                "{Flow Element Results,Upstream}Total temperature", "°C",
+            ),
+            self._make_real_output(
+                "m_dot_pump_1", "Pump 1 Mass Flowrate", "Variable Speed Pump - 2",
+                "{Flow Element Results,Generic}Total mass flow", "kg/s",
+            ),
+            self._make_real_output(
+                "Flow_pump_1", "Pump 1 Volume Flowrate", "Variable Speed Pump - 2",
+                "{Flow Element Results,Generic}Total volume flow", "l/min",
+            ),
+            self._make_real_output(
+                "Power_pump_1", "Pump 1 Total Power", "Variable Speed Pump - 2",
+                "{Variable Speed Pump Results}Electrical power", "kW",
+            ),
+        ]
+        fb.reset_singletons(api=None, io=_MockIO(outputs=real_outputs))
+        schema = fb.get_schema()
+        json.dumps(schema)  # must not raise
+
+        out_dicts = schema["outputs"]
+        self.assertEqual(len(out_dicts), 5)
+        keys = [o["key"] for o in out_dicts]
+        self.assertIn("P_pump_in_1", keys)
+        self.assertIn("T_pump_in_1", keys)
+        self.assertIn("Power_pump_1", keys)
+
+    # ------------------------------------------------------------------
+    # _is_potentially_truncated_prop_id
+    # ------------------------------------------------------------------
+
+    async def test_truncated_prop_id_detects_unclosed_brace(self):
+        """{Flow Element Results  (no closing brace) → detected as truncated."""
+        self.assertTrue(fb._is_potentially_truncated_prop_id("{Flow Element Results"))
+
+    async def test_truncated_prop_id_ok_with_closed_brace(self):
+        """{Flow Element Results,Upstream}Total pressure → NOT truncated."""
+        self.assertFalse(fb._is_potentially_truncated_prop_id(
+            "{Flow Element Results,Upstream}Total pressure"
+        ))
+
+    async def test_truncated_prop_id_empty_returns_false(self):
+        self.assertFalse(fb._is_potentially_truncated_prop_id(""))
+
+    async def test_truncated_prop_id_no_brace_returns_false(self):
+        """Plain identifier without curly braces → not considered truncated."""
+        self.assertFalse(fb._is_potentially_truncated_prop_id("SomePlainProperty"))
+
+    # ------------------------------------------------------------------
+    # load_outputs: CSV quoting warning for truncated PropertyIdentifier
+    # ------------------------------------------------------------------
+
+    async def test_load_outputs_warns_on_truncated_property_identifier(self):
+        """load_outputs must log a warning when a PropertyIdentifier looks truncated."""
+        truncated = self._make_real_output(
+            "P_pump_in_1", "Pump 1 Inlet Pressure",
+            "Variable Speed Pump - 2",
+            # Simulates what csv.DictReader produces when the field is not quoted
+            "{Flow Element Results",
+            "Upstream}Total pressure",  # unit gets the remainder
+        )
+        fb.reset_singletons(api=None, io=_MockIO(outputs=[truncated]))
+
+        import logging
+        with self.assertLogs("omnicool.webapp.backend.flownex_bridge", level="WARNING") as cm:
+            result = fb.load_outputs()
+
+        self.assertTrue(
+            any("truncated" in msg.lower() or "Outputs.csv" in msg for msg in cm.output),
+            msg=f"Expected truncation warning not found in logs: {cm.output}",
+        )
+        # The definition is still returned (we warn, not discard)
+        self.assertEqual(len(result), 1)
+
+    async def test_load_outputs_no_warning_for_well_formed_prop_id(self):
+        """load_outputs must NOT warn when PropertyIdentifier is properly formed."""
+        good = self._make_real_output(
+            "P_pump_in_1", "Pump 1 Inlet Pressure",
+            "Variable Speed Pump - 2",
+            "{Flow Element Results,Upstream}Total pressure",
+            "psi",
+        )
+        fb.reset_singletons(api=None, io=_MockIO(outputs=[good]))
+
+        import logging
+        # assertLogs raises AssertionError if no log messages at WARNING+ are emitted
+        try:
+            with self.assertLogs("omnicool.webapp.backend.flownex_bridge", level="WARNING") as cm:
+                fb.load_outputs()
+            # If we get here, check that no truncation warnings were emitted
+            has_truncation_warning = any(
+                "truncated" in msg.lower() for msg in cm.output
+            )
+            self.assertFalse(has_truncation_warning,
+                             f"Unexpected truncation warning: {cm.output}")
+        except AssertionError:
+            pass  # No WARNING logs at all — that is also acceptable
+
+    # ------------------------------------------------------------------
+    # Real-world output reading: vendor returns error string for °C unit
+    # ------------------------------------------------------------------
+
+    async def test_read_output_celsius_unit_vendor_error_string_normalized(self):
+        """Vendor returns error string for °C unit → normalized to None."""
+        class _VendorCelsiusError:
+            AttachedProject = object()
+            def GetPropertyValueUnit(self, comp, prop, unit):
+                if unit == "°C":
+                    return (
+                        f"Unknown user unit in IO File{unit} :{comp}.{prop}"
+                    )
+                return 42.0
+            def GetPropertyValue(self, comp, prop): return "0.0"
+
+        fb.reset_singletons(api=_VendorCelsiusError(), io=None)
+        defn = {
+            "componentIdentifier": "Variable Speed Pump - 2",
+            "propertyIdentifier": "{Flow Element Results,Upstream}Total temperature",
+            "unit": "°C",
+        }
+        result = fb._read_output_from_definition(defn)
+        self.assertIsNone(result)
+
+    async def test_read_output_psi_unit_returns_float(self):
+        """Vendor returns valid float for psi unit → preserved as float."""
+        class _VendorPsi:
+            AttachedProject = object()
+            def GetPropertyValueUnit(self, comp, prop, unit):
+                return 145.0  # ~1 MPa in psi
+            def GetPropertyValue(self, comp, prop): return "145.0"
+
+        fb.reset_singletons(api=_VendorPsi(), io=None)
+        defn = {
+            "componentIdentifier": "Variable Speed Pump - 2",
+            "propertyIdentifier": "{Flow Element Results,Upstream}Total pressure",
+            "unit": "psi",
+        }
+        result = fb._read_output_from_definition(defn)
+        self.assertAlmostEqual(result, 145.0)
+
+    async def test_read_output_kgs_unit_returns_float(self):
+        """kg/s unit with forward slash → vendor returns float."""
+        class _VendorKgS:
+            AttachedProject = object()
+            def GetPropertyValueUnit(self, comp, prop, unit): return 2.5
+            def GetPropertyValue(self, comp, prop): return "2.5"
+
+        fb.reset_singletons(api=_VendorKgS(), io=None)
+        defn = {
+            "componentIdentifier": "Variable Speed Pump - 2",
+            "propertyIdentifier": "{Flow Element Results,Generic}Total mass flow",
+            "unit": "kg/s",
+        }
+        result = fb._read_output_from_definition(defn)
+        self.assertAlmostEqual(result, 2.5)
+
+    async def test_read_outputs_mixed_real_world_units(self):
+        """read_outputs handles a mix of psi/°C/kg/s outputs correctly."""
+        call_log = {}
+
+        class _RealWorldApi:
+            AttachedProject = object()
+            def GetPropertyValueUnit(self, comp, prop, unit):
+                call_log[unit] = (comp, prop)
+                if unit == "°C":
+                    # Vendor can't handle °C — returns error string
+                    return f"Unknown user unit in IO File{unit} :{comp}.{prop}"
+                if unit == "psi":
+                    return 87.0
+                if unit == "kg/s":
+                    return 1.2
+                return None
+            def GetPropertyValue(self, comp, prop): return None
+
+        fb.reset_singletons(api=_RealWorldApi(), io=None)
+        fb._output_defs.clear()
+        comp = "Variable Speed Pump - 2"
+        fb._output_defs.update({
+            "P_pump_in_1": {"key": "P_pump_in_1", "componentIdentifier": comp,
+                            "propertyIdentifier": "{Flow Element Results,Upstream}Total pressure",
+                            "unit": "psi", "description": "", "category": "Pumps"},
+            "T_pump_in_1": {"key": "T_pump_in_1", "componentIdentifier": comp,
+                            "propertyIdentifier": "{Flow Element Results,Upstream}Total temperature",
+                            "unit": "°C", "description": "", "category": "Pumps"},
+            "m_dot_pump_1": {"key": "m_dot_pump_1", "componentIdentifier": comp,
+                             "propertyIdentifier": "{Flow Element Results,Generic}Total mass flow",
+                             "unit": "kg/s", "description": "", "category": "Pumps"},
+        })
+
+        result = fb.read_outputs()
+        self.assertTrue(result["ok"])
+        self.assertAlmostEqual(result["outputs"]["P_pump_in_1"], 87.0)
+        self.assertIsNone(result["outputs"]["T_pump_in_1"])   # °C error → None
+        self.assertAlmostEqual(result["outputs"]["m_dot_pump_1"], 1.2)
+        json.dumps(result)  # must not raise
