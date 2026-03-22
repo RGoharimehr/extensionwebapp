@@ -10,7 +10,11 @@ import omni.ext
 import omni.kit.app
 import carb
 
-from omnicool.webapp.backend.bridge_ws_handlers import handle_bridge_connect, handle_bridge_message
+from omnicool.webapp.backend.bridge_ws_handlers import (
+    handle_bridge_connect,
+    handle_bridge_message,
+    set_browse_callback,
+)
 from omnicool.webapp.backend.usd_helpers import _get_attr, _pick_prim_path
 from omnicool.webapp.backend.ws_handlers import handle_ws_message
 from omnicool.webapp.transport.http_server import (
@@ -85,7 +89,10 @@ class OmnicoolWebAppExt(omni.ext.IExt):
             if self._webrtc_enabled:
                 self._start_webrtc()
 
+        set_browse_callback(self._browse_file)
+
     def on_shutdown(self):
+        set_browse_callback(None)
         self._stop_webrtc()
         self._stop_bridge_ws()
         self._stop_ws()
@@ -137,8 +144,57 @@ class OmnicoolWebAppExt(omni.ext.IExt):
             self._http_thread = None
 
     # -----------------
-    # WebSocket USD bridge
+    # Native file / directory browser
     # -----------------
+    async def _browse_file(self, mode: str, filters: list) -> str:
+        """Open a native OS file or directory picker and return the chosen path.
+
+        Runs the blocking tkinter dialog in a thread-pool executor so the
+        asyncio event loop is not stalled.  Returns an empty string if the
+        user cancels or if tkinter is unavailable.
+
+        Args:
+            mode: ``"file"`` for a file-open dialog, ``"directory"`` for a
+                  folder-browser dialog.
+            filters: List of ``{"label": str, "extension": str}`` dicts
+                     (e.g. ``[{"label": "Flownex files", "extension":
+                     "*.proj;*.fnx"}]``).  Ignored for directory mode.
+        """
+        def _run_dialog() -> str:
+            try:
+                import tkinter as tk
+                from tkinter import filedialog
+
+                root = tk.Tk()
+                root.withdraw()
+                root.attributes("-topmost", True)
+
+                if mode == "directory":
+                    path = filedialog.askdirectory(parent=root)
+                else:
+                    # Convert {"label": "...", "extension": "*.x;*.y"} →
+                    # tkinter's [("label", "*.x *.y"), ...] format.
+                    tk_types = []
+                    for f in filters or []:
+                        label = str(f.get("label", "Files"))
+                        ext = str(f.get("extension", "*.*")).replace(";", " ")
+                        tk_types.append((label, ext))
+                    if not tk_types:
+                        tk_types = [("All Files", "*.*")]
+                    path = filedialog.askopenfilename(
+                        parent=root, filetypes=tk_types
+                    )
+
+                root.destroy()
+                return path or ""
+            except Exception as exc:  # noqa: BLE001
+                carb.log_warn(f"[omnicool.webapp][browse] dialog error: {exc}")
+                return ""
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _run_dialog)
+
+
     def _start_ws(self):
         if self._ws_task:
             return

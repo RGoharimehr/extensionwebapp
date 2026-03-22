@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, Dict, Set
+from typing import Any, Callable, Coroutine, Dict, Optional, Set
 
 from omnicool.webapp.backend import flownex_bridge as _fb
 
@@ -11,6 +11,24 @@ log = logging.getLogger(__name__)
 
 _clients: Set[Any] = set()
 _poll_task: asyncio.Task | None = None
+
+# Optional async callback registered by the host extension to open a native
+# file/directory picker.  Signature:
+#   async def _cb(mode: str, filters: list) -> str
+# where mode is "file" or "directory", filters is a list of
+# {"label": str, "extension": str} dicts, and the return value is the
+# selected path (empty string if cancelled).
+_browse_callback: Optional[Callable[..., Coroutine[Any, Any, str]]] = None
+
+
+def set_browse_callback(cb: Optional[Callable[..., Coroutine[Any, Any, str]]]) -> None:
+    """Register (or clear) the async browse-file callback.
+
+    The callback will be awaited when the frontend sends a
+    ``config.browse_file`` message.  Pass *None* to remove it.
+    """
+    global _browse_callback
+    _browse_callback = cb
 
 
 def _status_json(state: str, message: str = "", progress: float = 0.0) -> str:
@@ -60,12 +78,19 @@ def _state_json() -> str:
             "progress": 1.0,
         }
 
+    connected_project = snap.get("connected_project", "")
+    io_directory = snap.get("io_directory", "")
+
     return json.dumps({
         "type": "state",
         "payload": {
             "status": status_payload,
-            "connected_project": snap.get("connected_project", ""),
-            "io_directory": snap.get("io_directory", ""),
+            "connected_project": connected_project,
+            "io_directory": io_directory,
+            # Aliases expected by the frontend path-persistence IIFE so that
+            # paths are saved to localStorage whenever a state message arrives.
+            "savedProjectPath": connected_project,
+            "savedIoDir": io_directory,
             "inputs": snap.get("inputs", {}),
             "outputs": snap.get("outputs", {}),
             "history": snap.get("history", []),
@@ -402,6 +427,30 @@ async def handle_bridge_message(msg: str, websocket: Any) -> None:
             ))
             await websocket.send(_schema_json())
             await websocket.send(_state_json())
+
+        elif typ == "config.browse_file":
+            # The frontend sends this when the user clicks a "..." path-browse
+            # button.  We delegate to the registered async callback (if any) to
+            # open a native OS file / directory picker, then respond with a
+            # browse_result message so the frontend can populate the input.
+            req_id = str(data.get("id", "") or payload.get("requestId", ""))
+            mode = str(payload.get("mode", "file") or "file")
+            filters = payload.get("filters") or []
+
+            path = ""
+            if _browse_callback is not None:
+                try:
+                    path = await _browse_callback(mode, filters) or ""
+                except Exception as browse_exc:  # noqa: BLE001
+                    log.warning("[bridge_ws] browse_file callback error: %s", browse_exc)
+
+            await websocket.send(json.dumps({
+                "type": "browse_result",
+                "payload": {
+                    "requestId": req_id,
+                    "path": path,
+                },
+            }))
 
     except Exception as exc:  # noqa: BLE001
         log.warning("[bridge_ws] handler error for type=%r: %s", typ, exc)
