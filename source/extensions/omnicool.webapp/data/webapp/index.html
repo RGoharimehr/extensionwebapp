@@ -107,20 +107,15 @@
     }());
     </script>
 
-    <!-- == Configuration tab: path persistence + server-side file browser =
-         - Persists project path and IO dir to localStorage; restores them
-           whenever the Configuration tab inputs re-appear.
-         - Intercepts "..." browse buttons and sends config.browse_file to
-           the Kit extension for a native OS file dialog (full path).
+    <!-- == Configuration tab: server-side file browser + button cleanup =====
+         - Intercepts Browse buttons and sends config.browse_file to the Kit
+           extension for a native OS file dialog (full path).
+         - Hides browse buttons and redundant action buttons via MutationObserver.
          - Patches the bridge WebSocket (ws://127.0.0.1:8001, root path on
-           the aiohttp combined server) to intercept browse_result messages
-           and state messages carrying savedProjectPath / savedIoDir.
+           the aiohttp combined server) to intercept browse_result messages.
     ===================================================================== -->
     <script>
     (function () {
-      var LS_PROJECT = 'omnicool_projectFile';
-      var LS_IODIR   = 'omnicool_ioDirectory';
-
       var _nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
       function _setReactInput(inp, value) {
         _nativeSetter.call(inp, value);
@@ -136,28 +131,23 @@
           var ws = protocols ? new OrigWS(url, protocols) : new OrigWS(url);
           /* Bridge WS: root path on the aiohttp server (no /ws suffix). */
           if (url === 'ws://127.0.0.1:8001') {
-            var origOnMessage = null;
+            /* Use a single mutable closure ref so the getter/setter stays active
+               for the lifetime of the WebSocket (repeated assignments work). */
+            var _reactHandler = null;
+            var _ourHandler = function (evt) {
+              try {
+                var msg = JSON.parse(evt.data);
+                if (msg.type === 'browse_result') {
+                  var cb = _browseCallbacks[msg.payload && msg.payload.requestId];
+                  if (cb) { delete _browseCallbacks[msg.payload.requestId]; cb.resolve(msg.payload.path || ''); }
+                  return;
+                }
+              } catch (e) {}
+              if (_reactHandler) _reactHandler.call(ws, evt);
+            };
             Object.defineProperty(ws, 'onmessage', {
-              get: function () { return origOnMessage; },
-              set: function (fn) {
-                origOnMessage = function (evt) {
-                  try {
-                    var msg = JSON.parse(evt.data);
-                    if (msg.type === 'browse_result') {
-                      var cb = _browseCallbacks[msg.payload && msg.payload.requestId];
-                      if (cb) { delete _browseCallbacks[msg.payload.requestId]; cb.resolve(msg.payload.path || ''); }
-                      return;
-                    }
-                    if (msg.type === 'state' && msg.payload) {
-                      if (msg.payload.savedProjectPath) localStorage.setItem(LS_PROJECT, msg.payload.savedProjectPath);
-                      if (msg.payload.savedIoDir)        localStorage.setItem(LS_IODIR,   msg.payload.savedIoDir);
-                      setTimeout(_tryRestorePaths, 200);
-                    }
-                  } catch (e) {}
-                  if (fn) fn.call(ws, evt);
-                };
-                Object.defineProperty(ws, 'onmessage', { value: origOnMessage, writable: true, configurable: true });
-              },
+              get: function () { return _reactHandler ? _ourHandler : null; },
+              set: function (fn) { _reactHandler = fn; },
               configurable: true
             });
           }
@@ -179,30 +169,6 @@
             if (_browseCallbacks[reqId]) { delete _browseCallbacks[reqId]; reject(new Error('Browse dialog timed out or was cancelled')); }
           }, 120000);
           window.__bridgeAPI.send({ type: 'config.browse_file', id: reqId, payload: { mode: mode, filters: filters || [], requestId: reqId } });
-        });
-      }
-
-      function _patchBridgeAPI() {
-        if (!window.__bridgeAPI || window.__bridgeAPI._configPatched) return;
-        window.__bridgeAPI._configPatched = true;
-        var orig = window.__bridgeAPI.configure;
-        window.__bridgeAPI.configure = function (projectPath, ioDir, backend) {
-          if (projectPath) localStorage.setItem(LS_PROJECT, projectPath);
-          if (ioDir)        localStorage.setItem(LS_IODIR,   ioDir);
-          return orig.apply(this, arguments);
-        };
-      }
-
-      var _populated = new WeakSet();
-      function _tryRestorePaths() {
-        var savedProject = localStorage.getItem(LS_PROJECT) || '';
-        var savedIoDir   = localStorage.getItem(LS_IODIR)   || '';
-        if (!savedProject && !savedIoDir) return;
-        document.querySelectorAll('input[type="text"]').forEach(function (inp) {
-          if (_populated.has(inp)) return;
-          var ph = inp.getAttribute('placeholder') || '';
-          if (savedProject && (ph.indexOf('.proj') !== -1 || ph.indexOf('.flnx') !== -1)) { _populated.add(inp); if (!inp.value) _setReactInput(inp, savedProject); }
-          else if (savedIoDir && ph.indexOf('IOFiles') !== -1) { _populated.add(inp); if (!inp.value) _setReactInput(inp, savedIoDir); }
         });
       }
 
@@ -245,14 +211,17 @@
             probe = probe.parentElement;
           }
 
-          /* ── Strategy 2: Kit-style panel (content-length heuristic) ──── */
+          /* ── Strategy 2: Kit-style panel — walk up until we find a parent
+               that has more than one element child, meaning our title span
+               is not the sole content and the parent is a structural
+               panel/section wrapper (works even when the body is empty). */
           if (!target) {
-            var titleLen = txt.replace(/\s+/g, '').length;
             var el = node.parentElement;
             while (el && el !== document.body) {
-              if (el.textContent.replace(/\s+/g, '').length > titleLen + 20) { target = el; break; }
-              if (!el.parentElement || el.parentElement === document.body) break;
-              el = el.parentElement;
+              var parent = el.parentElement;
+              if (!parent || parent === document.body) break;
+              if (parent.children.length > 1) { target = parent; break; }
+              el = parent;
             }
           }
 
@@ -267,8 +236,8 @@
           if (_browseBtnsPatched.has(btn)) return;
           var label = btn.textContent.trim();
 
-          /* ── Hide Browse "..." and "Browse..." buttons ──────────────── */
-          if (label === '...' || label === 'Browse...') {
+          /* ── Hide Browse "...", "Browse...", and unicode-ellipsis variants ── */
+          if (label === '...' || label === 'Browse...' || label === 'Browse\u2026' || label === '\u2026') {
             _browseBtnsPatched.add(btn);
             btn.style.setProperty('display', 'none', 'important');
             /* Also widen the sibling text-input so there's no gap. */
@@ -313,8 +282,6 @@
                 btn.disabled = false; btn.textContent = origLabel;
                 if (!path) return;
                 _setReactInput(sibling, path);
-                if (isProject) localStorage.setItem(LS_PROJECT, path);
-                else           localStorage.setItem(LS_IODIR,   path);
                 if (window.__omniShowToast) window.__omniShowToast('\u2713 Path set: ' + path, false);
               })
               .catch(function (err) {
@@ -326,8 +293,6 @@
       }
 
       new MutationObserver(function () {
-        _patchBridgeAPI();
-        _tryRestorePaths();
         _patchBrowseButtons();
         _hideUnwantedSections();
       }).observe(document.documentElement, { childList: true, subtree: true });
