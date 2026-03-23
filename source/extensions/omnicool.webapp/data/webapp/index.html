@@ -201,7 +201,7 @@
         document.querySelectorAll('input[type="text"]').forEach(function (inp) {
           if (_populated.has(inp)) return;
           var ph = inp.getAttribute('placeholder') || '';
-          if (savedProject && ph.indexOf('.proj') !== -1) { _populated.add(inp); if (!inp.value) _setReactInput(inp, savedProject); }
+          if (savedProject && (ph.indexOf('.proj') !== -1 || ph.indexOf('.flnx') !== -1)) { _populated.add(inp); if (!inp.value) _setReactInput(inp, savedProject); }
           else if (savedIoDir && ph.indexOf('IOFiles') !== -1) { _populated.add(inp); if (!inp.value) _setReactInput(inp, savedIoDir); }
         });
       }
@@ -298,18 +298,19 @@
           var sibling = row.querySelector ? row.querySelector('input[type="text"]') : null;
           if (!sibling) return;
           var ph = sibling.getAttribute('placeholder') || '';
-          var isProject = ph.indexOf('.proj') !== -1;
+          var isProject = ph.indexOf('.proj') !== -1 || ph.indexOf('.flnx') !== -1;
           var isIoDir   = ph.indexOf('IOFiles') !== -1;
           if (!isProject && !isIoDir) return;
           _browseBtnsPatched.add(btn);
+          var origLabel = btn.textContent;
           btn.addEventListener('click', function (e) {
             e.preventDefault(); e.stopImmediatePropagation();
             var mode = isIoDir ? 'directory' : 'file';
-            var filters = isProject ? [{ label: 'Flownex / project files', extension: '*.proj;*.fnx;*.zip;*.json' }] : [];
+            var filters = isProject ? [{ label: 'Flownex / project files', extension: '*.flnx;*.proj;*.fnx;*.zip;*.json' }] : [];
             btn.disabled = true; btn.textContent = '\u2026';
             _serverBrowse(mode, filters)
               .then(function (path) {
-                btn.disabled = false; btn.textContent = '...';
+                btn.disabled = false; btn.textContent = origLabel;
                 if (!path) return;
                 _setReactInput(sibling, path);
                 if (isProject) localStorage.setItem(LS_PROJECT, path);
@@ -317,7 +318,7 @@
                 if (window.__omniShowToast) window.__omniShowToast('\u2713 Path set: ' + path, false);
               })
               .catch(function (err) {
-                btn.disabled = false; btn.textContent = '...';
+                btn.disabled = false; btn.textContent = origLabel;
                 if (window.__omniShowToast) window.__omniShowToast('\u26a0 ' + err.message + ' \u2014 paste the path manually.', true);
               });
           }, true);
