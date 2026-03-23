@@ -58,6 +58,5 @@ Inputs.csv
 Outputs.csv
 StaticInputs.csv
 
-# User-specific connection settings persisted by the backend config_store
-# (project path, IO directory, solveOnChange, resultPollingInterval, etc.)
+# User-specific connection settings (project path, IO directory, etc.)
 omnicool_config.json
