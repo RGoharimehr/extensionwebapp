@@ -351,6 +351,96 @@ class OmnicoolWebAppExt(omni.ext.IExt):
 
                 _webrtc_sessions: set = set()
 
+                # ----------------------------------------------------------
+                # Kit viewport video track for WebRTC streaming
+                #
+                # Captures the active Kit render target (swapchain) once per
+                # WebRTC frame using omni.renderer_capture, reads it back via
+                # PyAV, and delivers an av.VideoFrame to the browser.  Works
+                # in both windowed and headless/windowless Kit configurations.
+                # Falls back to a dark-grey placeholder frame when:
+                #   - omni.renderer_capture is unavailable, or
+                #   - the capture file is not written within 50 ms.
+                # ----------------------------------------------------------
+                _KitViewportVideoTrack = None
+                try:
+                    import av as _pav
+                    import numpy as _pnp
+                    from aiortc.mediastreams import VideoStreamTrack as _BaseVT
+
+                    class _KitViewportVideoTrack(_BaseVT):  # type: ignore[misc]
+                        kind = "video"
+                        _W, _H = 1920, 1080
+
+                        async def recv(self):
+                            pts, time_base = await self.next_timestamp()
+                            arr = await self._capture_viewport()
+                            frame = _pav.VideoFrame.from_ndarray(arr, format="bgr24")
+                            frame.pts = pts
+                            frame.time_base = time_base
+                            return frame
+
+                        async def _capture_viewport(self):
+                            import os
+                            import tempfile
+                            try:
+                                import omni.renderer_capture as _rc
+                                fd, tmp = tempfile.mkstemp(suffix=".png")
+                                try:
+                                    os.close(fd)  # release fd so Kit can overwrite
+                                    iface = _rc.acquire_renderer_capture_interface()
+                                    iface.capture_next_frame_swapchain_async(tmp)
+                                    # Yield up to 5 × 10 ms ≈ 50 ms for Kit to
+                                    # render and write the file.
+                                    for _ in range(5):
+                                        await asyncio.sleep(0.01)
+                                        if os.path.getsize(tmp) > 0:
+                                            break
+                                    if os.path.getsize(tmp) > 0:
+                                        arr = await asyncio.get_event_loop().run_in_executor(
+                                            None,
+                                            lambda: _KitViewportVideoTrack._read_png_bgr(tmp),
+                                        )
+                                        if arr is not None:
+                                            return arr
+                                finally:
+                                    try:
+                                        os.unlink(tmp)
+                                    except OSError:
+                                        pass
+                            except Exception as _exc:
+                                carb.log_warn(
+                                    f"[omnicool.webapp][webrtc] viewport capture: {_exc}"
+                                )
+                            # Fallback: dark-grey placeholder frame
+                            return _pnp.full(
+                                (self._H, self._W, 3), 25, dtype=_pnp.uint8
+                            )
+
+                        @classmethod
+                        def _read_png_bgr(cls, path: str):
+                            """Read a PNG file and return a (H×W×3) uint8 BGR array."""
+                            try:
+                                container = _pav.open(path, "r")
+                                try:
+                                    for vf in container.decode(video=0):
+                                        arr = vf.to_ndarray(format="bgr24")
+                                        h, w = arr.shape[:2]
+                                        if (h, w) != (cls._H, cls._W):
+                                            # Nearest-neighbour resize (no extra deps)
+                                            ri = _pnp.arange(cls._H) * h // cls._H
+                                            ci = _pnp.arange(cls._W) * w // cls._W
+                                            arr = arr[ri[:, None], ci[None, :]]
+                                        return arr
+                                finally:
+                                    container.close()
+                            except Exception:
+                                pass
+                            return None
+
+                except ImportError:
+                    pass  # av / numpy not available; WebRTC runs data-channel only
+
                 async def cors_preflight_handler(request):
                     """Handle the CORS preflight OPTIONS request the browser sends
                     before POST /webrtc/offer when the page origin differs from the
@@ -389,6 +479,14 @@ class OmnicoolWebAppExt(omni.ext.IExt):
 
                     pc = RTCPeerConnection()
                     _webrtc_sessions.add(pc)
+
+                    # Attach the viewport video track so the browser receives
+                    # the Kit render output (works in both windowed and
+                    # headless/windowless mode).  Must be added before
+                    # setRemoteDescription so the SDP answer includes the
+                    # video m-section as sendonly.
+                    if _KitViewportVideoTrack is not None:
+                        pc.addTrack(_KitViewportVideoTrack())
 
                     @pc.on("datachannel")
                     def on_datachannel(channel):
