@@ -222,7 +222,6 @@ def map_outputs_to_prims(
     import csv  # noqa: PLC0415
     import json  # noqa: PLC0415
     import os  # noqa: PLC0415
-    import omni.usd  # noqa: PLC0415
 
     outputs_path = (
         os.path.join(io_dir, outputs_filename) if io_dir else outputs_filename
@@ -247,6 +246,7 @@ def map_outputs_to_prims(
         return ("No component identifiers found in Outputs.csv.", "")
 
     # Traverse USD stage and match against flownex:componentName
+    import omni.usd  # noqa: PLC0415
     stage = omni.usd.get_context().get_stage()
     if not stage:
         return ("No USD stage loaded.", "")
