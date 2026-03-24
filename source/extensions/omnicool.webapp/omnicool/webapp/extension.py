@@ -27,7 +27,12 @@ from omnicool.webapp.transport.webrtc_server import WebRTCSignalingServer
 from omnicool.webapp.backend import config_store
 import os
 
-config_path = os.path.join(os.getcwd(), "webapp_config.json")
+ext_path = os.path.dirname(__file__)
+config_path = os.path.join(ext_path, "webapp_config.json")
+
+print("[startup] ext_path =", ext_path)
+print("[startup] config_path =", config_path)
+
 config_store.set_path(config_path)
 
 class OmnicoolWebAppExt(omni.ext.IExt):
