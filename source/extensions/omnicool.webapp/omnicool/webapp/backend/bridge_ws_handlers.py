@@ -53,8 +53,8 @@ async def handle_bridge_message(message: str, ws):
             poll_interval = payload.get("resultPollingInterval", 1.0)
 
             cfg = {
-                "projectFile": project,
-                "ioDirectory": io_dir,
+                "flownexProject": project,
+                "ioFileDirectory": io_dir,
                 "resultPollingInterval": poll_interval,
             }
 
