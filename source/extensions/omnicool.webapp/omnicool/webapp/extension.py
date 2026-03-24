@@ -10,7 +10,12 @@ import omni.ext
 import omni.kit.app
 import carb
 
-from omnicool.webapp.backend.bridge_ws_handlers import handle_bridge_connect, handle_bridge_message
+from omnicool.webapp.backend import config_store as _cs
+from omnicool.webapp.backend.bridge_ws_handlers import (
+    apply_saved_config,
+    handle_bridge_connect,
+    handle_bridge_message,
+)
 from omnicool.webapp.backend.usd_helpers import _get_attr, _pick_prim_path
 from omnicool.webapp.backend.ws_handlers import handle_ws_message
 from omnicool.webapp.transport.http_server import (
@@ -66,6 +71,9 @@ class OmnicoolWebAppExt(omni.ext.IExt):
         ext_path = mgr.get_extension_path(ext_id)
         self._web_root = os.path.join(ext_path, self._web_root_rel)
 
+        print(f"[startup] ext_path = {ext_path}")
+        print(f"[startup] web_root = {self._web_root}")
+
         carb.log_info(f"[omnicool.webapp] web_root={self._web_root}")
         carb.log_info(f"[omnicool.webapp] http=http://{self._host}:{self._port}")
         carb.log_info(f"[omnicool.webapp] ws=ws://{self._ws_host}:{self._ws_port}")
@@ -78,7 +86,14 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                 f"[omnicool.webapp] standalone webrtc=http://{self._webrtc_host}:{self._webrtc_port}"
             )
 
+        # Configure persistence layer and restore any previously saved config
+        config_path = os.path.join(ext_path, "data", "omnicool_config.json")
+        _cs.set_path(config_path)
+        print("[startup] config path set")
+        apply_saved_config()
+
         if self._auto:
+            print("[startup] http/ws/bridge/webrtc starting")
             self._start_http()
             self._start_ws()
             self._start_bridge_ws()
@@ -267,6 +282,70 @@ class OmnicoolWebAppExt(omni.ext.IExt):
 
                 _webrtc_sessions: set = set()
 
+                async def _try_add_video_track(pc) -> None:
+                    """Attach a Kit viewport video track to *pc* if dependencies allow.
+
+                    Attempts to stream the Kit swapchain via omni.renderer_capture.
+                    Falls back to a dark-grey static frame when the renderer or
+                    av/numpy are unavailable.  Fails silently if aiortc is missing.
+                    """
+                    try:
+                        from aiortc.mediastreams import VideoStreamTrack  # type: ignore  # noqa: PLC0415
+                        import av  # type: ignore  # noqa: PLC0415
+                        import numpy as np  # type: ignore  # noqa: PLC0415
+                        import tempfile
+                        import os as _os
+
+                        class _KitViewportVideoTrack(VideoStreamTrack):
+                            kind = "video"
+
+                            async def recv(self):
+                                pts, time_base = await self.next_timestamp()
+                                frame = None
+
+                                # Try to capture the Kit swapchain
+                                try:
+                                    import omni.renderer_capture  # type: ignore  # noqa: PLC0415
+                                    fd, tmp_path = tempfile.mkstemp(suffix=".png")
+                                    _os.close(fd)
+                                    try:
+                                        await omni.renderer_capture.capture_next_frame_swapchain_async(tmp_path)
+                                        container = av.open(tmp_path)
+                                        for stream in container.streams.video:
+                                            for packet in container.demux(stream):
+                                                for f in packet.decode():
+                                                    frame = f
+                                                    break
+                                                if frame:
+                                                    break
+                                            break
+                                        container.close()
+                                    finally:
+                                        try:
+                                            _os.unlink(tmp_path)
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    frame = None
+
+                                # Fallback: dark-grey numpy frame
+                                if frame is None:
+                                    img = np.full((720, 1280, 3), 30, dtype=np.uint8)
+                                    frame = av.VideoFrame.from_ndarray(img, format="rgb24")
+
+                                frame.pts = pts
+                                frame.time_base = time_base
+                                return frame
+
+                        track = _KitViewportVideoTrack()
+                        pc.addTrack(track)
+                        print("[webrtc] track attached")
+                        carb.log_info("[omnicool.webapp][webrtc] video track attached")
+                    except Exception as e:
+                        carb.log_info(
+                            f"[omnicool.webapp][webrtc] video track unavailable: {e}"
+                        )
+
                 async def cors_preflight_handler(request):
                     """Handle the CORS preflight OPTIONS request the browser sends
                     before POST /webrtc/offer when the page origin differs from the
@@ -303,7 +382,9 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                             headers=_CORS_HEADERS,
                         )
 
+                    print("[webrtc] offer received")
                     pc = RTCPeerConnection()
+                    print("[webrtc] peer connection created")
                     _webrtc_sessions.add(pc)
 
                     @pc.on("datachannel")
@@ -318,6 +399,9 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                     async def on_state():
                         if pc.connectionState in ("closed", "failed", "disconnected"):
                             _webrtc_sessions.discard(pc)
+
+                    # Attach a Kit viewport video track if dependencies are available
+                    await _try_add_video_track(pc)
 
                     offer = RTCSessionDescription(sdp=sdp, type=sdp_type)
                     await pc.setRemoteDescription(offer)

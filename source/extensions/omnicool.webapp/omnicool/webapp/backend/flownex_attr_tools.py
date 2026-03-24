@@ -50,6 +50,7 @@ _RESULT_ATTRS_SPEC = [
     ("flownex:massFlowrate",       "Float", 0.0),
     ("flownex:quality",            "Float", 0.0),
     ("flownex:density",            "Float", 0.0),
+    ("flownex:T_Case",             "Float", 0.0),
 ]
 
 # ---------------------------------------------------------------------------
@@ -182,5 +183,103 @@ def deinstance_and_add_flownex(root: str = "/World") -> str:
 
     return (
         f"De-instanced {deinstanced}, added Flownex attrs to {added} prims "
-        f"(componentName + 6 result attrs). Total prims with name: {final_named_count}."
+        f"(componentName + 7 result attrs). Total prims with name: {final_named_count}."
     )
+
+
+def map_outputs_to_prims(
+    io_dir: str = "",
+    outputs_filename: str = "Outputs.csv",
+    root: str = "/World",
+    out_name: str = "FlownexMapping.json",
+) -> tuple:
+    """
+    Read *Outputs.csv* and build a mapping from Flownex component identifiers to
+    USD prim paths by matching the ``flownex:componentName`` attribute.
+
+    An optional JSON file is written with the mapping when *io_dir* and
+    *out_name* are both provided.
+
+    Parameters
+    ----------
+    io_dir:
+        Directory that contains *outputs_filename*.  If empty, the current
+        working directory is used.
+    outputs_filename:
+        CSV file listing Flownex outputs (must contain a
+        ``ComponentIdentifier`` column).
+    root:
+        Only prims under this USD path are considered.
+    out_name:
+        Filename for the JSON mapping file written to *io_dir*.
+        Pass an empty string to skip writing.
+
+    Returns
+    -------
+    tuple
+        ``(summary_message: str, output_file_path: str)``
+    """
+    import csv  # noqa: PLC0415
+    import json  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    import omni.usd  # noqa: PLC0415
+
+    outputs_path = (
+        os.path.join(io_dir, outputs_filename) if io_dir else outputs_filename
+    )
+
+    if not os.path.isfile(outputs_path):
+        return (f"Outputs file not found: {outputs_path}", "")
+
+    # Collect component identifiers from Outputs.csv
+    components: set = set()
+    try:
+        with open(outputs_path, newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            for row in reader:
+                comp = (row.get("ComponentIdentifier") or "").strip()
+                if comp:
+                    components.add(comp)
+    except Exception as exc:  # noqa: BLE001
+        return (f"Error reading {outputs_path}: {exc}", "")
+
+    if not components:
+        return ("No component identifiers found in Outputs.csv.", "")
+
+    # Traverse USD stage and match against flownex:componentName
+    stage = omni.usd.get_context().get_stage()
+    if not stage:
+        return ("No USD stage loaded.", "")
+
+    mapping: dict = {}
+    for prim in stage.Traverse():
+        if not prim.IsValid():
+            continue
+        if not prim.GetPath().pathString.startswith(root):
+            continue
+        attr = prim.GetAttribute("flownex:componentName")
+        if not attr or not attr.IsValid():
+            continue
+        comp_name = str(attr.Get() or "")
+        if comp_name and comp_name in components:
+            mapping[comp_name] = str(prim.GetPath())
+
+    matched = len(mapping)
+    total = len(components)
+
+    # Write mapping JSON if requested
+    out_path = ""
+    if io_dir and out_name:
+        out_path = os.path.join(io_dir, out_name)
+        try:
+            with open(out_path, "w", encoding="utf-8") as fh:
+                json.dump(mapping, fh, indent=2)
+        except Exception as exc:  # noqa: BLE001
+            return (f"Error writing {out_path}: {exc}", "")
+
+    msg = (
+        f"Mapped {matched}/{total} Flownex components to USD prims."
+        + (f" Mapping saved to: {out_path}" if out_path else "")
+    )
+    return (msg, out_path)
+

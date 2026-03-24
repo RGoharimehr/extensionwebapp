@@ -105,6 +105,15 @@ RESULT_ATTRS: Dict[str, Dict[str, Any]] = OrderedDict(
                 "default": 0.0,
             },
         ),
+        (
+            "T_Case",
+            {
+                "attr": "flownex:T_Case",
+                "fnx_prop": "T Case",
+                "sdf_type": Sdf.ValueTypeNames.Float,
+                "default": 0.0,
+            },
+        ),
     ]
 )
 

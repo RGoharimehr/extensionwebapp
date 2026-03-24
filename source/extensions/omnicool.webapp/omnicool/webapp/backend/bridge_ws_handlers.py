@@ -5,6 +5,7 @@ import json
 import logging
 from typing import Any, Dict, Set
 
+from omnicool.webapp.backend import config_store as _cs
 from omnicool.webapp.backend import flownex_bridge as _fb
 
 log = logging.getLogger(__name__)
@@ -66,6 +67,9 @@ def _state_json() -> str:
             "status": status_payload,
             "connected_project": snap.get("connected_project", ""),
             "io_directory": snap.get("io_directory", ""),
+            # Aliases used by the index.html IIFE for localStorage path persistence
+            "savedProjectPath": snap.get("connected_project", ""),
+            "savedIoDir": snap.get("io_directory", ""),
             "inputs": snap.get("inputs", {}),
             "outputs": snap.get("outputs", {}),
             "history": snap.get("history", []),
@@ -165,6 +169,43 @@ async def handle_bridge_connect(websocket: Any) -> None:
         _clients.discard(websocket)
 
 
+def apply_saved_config() -> None:
+    """Restore persisted config from config_store into flownex_bridge.
+
+    Called once at extension startup after ``config_store.set_path()``.
+    Maps config_store field names to flownex_bridge patch keys.
+    """
+    try:
+        cfg = _cs.load_config()
+        if not cfg:
+            log.info("[bridge_ws] apply_saved_config: no saved config found")
+            return
+
+        patch: Dict[str, Any] = {}
+        if cfg.get("projectFile"):
+            patch["flownexProject"] = cfg["projectFile"]
+        if cfg.get("ioDirectory"):
+            patch["ioFileDirectory"] = cfg["ioDirectory"]
+        if "solveOnChange" in cfg:
+            patch["solveOnChange"] = cfg["solveOnChange"]
+        if "resultPollingInterval" in cfg:
+            patch["resultPollingInterval"] = cfg["resultPollingInterval"]
+
+        if patch:
+            result = _fb.set_config(patch)
+            if "error" not in result:
+                log.info(
+                    "[bridge_ws] apply_saved_config: restored keys=%s",
+                    list(patch.keys()),
+                )
+            else:
+                log.warning(
+                    "[bridge_ws] apply_saved_config: set_config returned error: %s",
+                    result["error"],
+                )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[bridge_ws] apply_saved_config error: %s", exc)
+
 async def handle_bridge_message(msg: str, websocket: Any) -> None:
     try:
         data = json.loads(msg)
@@ -175,6 +216,9 @@ async def handle_bridge_message(msg: str, websocket: Any) -> None:
 
     typ: str = data.get("type", "")
     payload: Dict[str, Any] = data.get("payload") or {}
+
+    print(f"[bridge] msg_type = {typ!r}")
+    log.debug("[bridge_ws] received type=%r payload=%r", typ, payload)
 
     try:
         if typ == "configure":
@@ -197,6 +241,14 @@ async def handle_bridge_message(msg: str, websocket: Any) -> None:
                 if "error" in result:
                     await websocket.send(_status_json("error", result["error"], 0.0))
                     return
+
+            # Persist to disk so paths survive extension restarts
+            _cs.save_config({
+                "projectFile": project_path,
+                "ioDirectory": io_dir,
+                "solveOnChange": bool(payload.get("solveOnChange", False)),
+                "resultPollingInterval": payload.get("resultPollingInterval", 1.0),
+            })
 
             await websocket.send(_status_json(
                 "idle",
@@ -393,6 +445,12 @@ async def handle_bridge_message(msg: str, websocket: Any) -> None:
                     await websocket.send(_status_json("error", result["error"], 0.0))
                     return
 
+            # Persist to disk
+            _cs.save_config({
+                "projectFile": project_path,
+                "ioDirectory": io_dir,
+            })
+
             await websocket.send(_status_json("running", "Connecting to project…", 0.1))
             result = _fb.open_project()
             await websocket.send(_status_json(
@@ -402,6 +460,36 @@ async def handle_bridge_message(msg: str, websocket: Any) -> None:
             ))
             await websocket.send(_schema_json())
             await websocket.send(_state_json())
+
+        elif typ == "get_schema":
+            await websocket.send(_schema_json())
+            await websocket.send(_state_json())
+
+        elif typ == "read_outputs":
+            result = _fb.read_outputs()
+            await websocket.send(_status_json(
+                "idle" if result.get("ok") else "error",
+                result.get("message", ""),
+                1.0 if result.get("ok") else 0.0,
+            ))
+            if result.get("ok"):
+                await _broadcast_outputs(result.get("outputs", {}))
+            else:
+                await websocket.send(_state_json())
+
+        elif typ == "config.browse_file":
+            # tkinter is not available in this environment; return an empty
+            # path so the frontend falls back gracefully to manual paste.
+            req_id = data.get("id", "") or payload.get("requestId", "")
+            request_id = payload.get("requestId", req_id)
+            log.info("[bridge_ws] config.browse_file: tkinter unavailable, returning empty path")
+            await websocket.send(json.dumps({
+                "type": "browse_result",
+                "payload": {
+                    "requestId": request_id,
+                    "path": "",
+                },
+            }))
 
     except Exception as exc:  # noqa: BLE001
         log.warning("[bridge_ws] handler error for type=%r: %s", typ, exc)
