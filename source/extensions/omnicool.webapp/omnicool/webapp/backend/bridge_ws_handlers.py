@@ -169,7 +169,7 @@ async def handle_bridge_message(message: str, ws):
             "payload": result,
         }
         if msg_id:
-            response["id"] = msg_ids
+            response["id"] = msg_id
 
         await ws.send(json.dumps(response))
 
