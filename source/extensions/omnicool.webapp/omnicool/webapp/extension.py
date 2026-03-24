@@ -17,7 +17,6 @@ from omnicool.webapp.backend.bridge_ws_handlers import (
     set_browse_callback,
 )
 from omnicool.webapp.backend import config_store
-from omnicool.webapp.backend.usd_helpers import _get_attr, _pick_prim_path
 from omnicool.webapp.backend.ws_handlers import handle_ws_message
 from omnicool.webapp.transport.http_server import (
     _StaticHandler,
@@ -25,32 +24,34 @@ from omnicool.webapp.transport.http_server import (
     _ensure_aiortc_installed,
 )
 from omnicool.webapp.transport.webrtc_server import WebRTCSignalingServer
+from omnicool.webapp.backend import config_store
+import os
 
+config_path = os.path.join(os.getcwd(), "webapp_config.json")
+config_store.set_path(config_path)
 
 class OmnicoolWebAppExt(omni.ext.IExt):
     def on_startup(self, ext_id: str):
         self._ext_id = ext_id
 
-        # HTTP server state
         self._httpd = None
         self._http_thread = None
 
-        # WS server state
         self._ws_server = None
         self._ws_task = None
 
-        # Bridge WS server state (port 8001 — used by the React webapp)
         self._bridge_ws_server = None
         self._bridge_ws_task = None
 
-        # WebRTC signaling server state
         self._webrtc_server: WebRTCSignalingServer | None = None
         self._webrtc_task = None
 
         settings = carb.settings.get_settings()
         base = "/exts/omnicool.webapp"
-        self._auto = bool(settings.get(f"{base}/autoLaunch") or True)
-        self._open_browser = bool(settings.get(f"{base}/openBrowser") or True)
+
+        self._auto = self._get_bool_setting(settings, f"{base}/autoLaunch", True)
+        self._open_browser = self._get_bool_setting(settings, f"{base}/openBrowser", True)
+        self._webrtc_enabled = self._get_bool_setting(settings, f"{base}/webrtcEnabled", False)
 
         self._host = str(settings.get(f"{base}/host") or "127.0.0.1")
         self._port = int(settings.get(f"{base}/port") or 3001)
@@ -59,11 +60,9 @@ class OmnicoolWebAppExt(omni.ext.IExt):
         self._ws_host = str(settings.get(f"{base}/wsHost") or "127.0.0.1")
         self._ws_port = int(settings.get(f"{base}/wsPort") or 8899)
 
-        # The React webapp connects to ws://127.0.0.1:8001 (root path) for its bridge.
         self._bridge_ws_host = str(settings.get(f"{base}/bridgeWsHost") or "127.0.0.1")
         self._bridge_ws_port = int(settings.get(f"{base}/bridgeWsPort") or 8001)
 
-        self._webrtc_enabled = bool(settings.get(f"{base}/webrtcEnabled") or False)
         self._webrtc_host = str(settings.get(f"{base}/webrtcHost") or "127.0.0.1")
         self._webrtc_port = int(settings.get(f"{base}/webrtcPort") or 8900)
 
@@ -71,8 +70,6 @@ class OmnicoolWebAppExt(omni.ext.IExt):
         ext_path = mgr.get_extension_path(ext_id)
         self._web_root = os.path.join(ext_path, self._web_root_rel)
 
-        # Point the config store at the extension's data directory and restore
-        # any previously saved project / IO paths into the Flownex IO layer.
         config_store.set_path(os.path.join(ext_path, "data", "omnicool_config.json"))
         apply_saved_config()
 
@@ -95,7 +92,7 @@ class OmnicoolWebAppExt(omni.ext.IExt):
             if self._webrtc_enabled:
                 self._start_webrtc()
 
-        set_browse_callback(self._browse_file)
+        set_browse_callback(None)
 
     def on_shutdown(self):
         set_browse_callback(None)
@@ -104,9 +101,13 @@ class OmnicoolWebAppExt(omni.ext.IExt):
         self._stop_ws()
         self._stop_http()
 
-    # -----------------
-    # HTTP
-    # -----------------
+    @staticmethod
+    def _get_bool_setting(settings, key: str, default: bool) -> bool:
+        value = settings.get(key)
+        if value is None:
+            return default
+        return bool(value)
+
     def _start_http(self):
         if self._httpd:
             return
@@ -116,7 +117,7 @@ class OmnicoolWebAppExt(omni.ext.IExt):
             carb.log_error(
                 "[omnicool.webapp][http] index.html not found. "
                 f"Expected: {index_html}. "
-                "Copy your CRA build/ contents into data/webapp/."
+                "Copy your web build into data/webapp/."
             )
             return
 
@@ -149,23 +150,7 @@ class OmnicoolWebAppExt(omni.ext.IExt):
             self._httpd = None
             self._http_thread = None
 
-    # -----------------
-    # Native file / directory browser
-    # -----------------
     async def _browse_file(self, mode: str, filters: list) -> str:
-        """Open a native OS file or directory picker and return the chosen path.
-
-        Runs the blocking tkinter dialog in a thread-pool executor so the
-        asyncio event loop is not stalled.  Returns an empty string if the
-        user cancels or if tkinter is unavailable.
-
-        Args:
-            mode: ``"file"`` for a file-open dialog, ``"directory"`` for a
-                  folder-browser dialog.
-            filters: List of ``{"label": str, "extension": str}`` dicts
-                     (e.g. ``[{"label": "Flownex files", "extension":
-                     "*.proj;*.fnx"}]``).  Ignored for directory mode.
-        """
         def _run_dialog() -> str:
             try:
                 import tkinter as tk
@@ -178,8 +163,6 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                 if mode == "directory":
                     path = filedialog.askdirectory(parent=root)
                 else:
-                    # Convert {"label": "...", "extension": "*.x;*.y"} →
-                    # tkinter's [("label", "*.x *.y"), ...] format.
                     tk_types = []
                     for f in filters or []:
                         label = str(f.get("label", "Files"))
@@ -187,22 +170,17 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                         tk_types.append((label, ext))
                     if not tk_types:
                         tk_types = [("All Files", "*.*")]
-                    path = filedialog.askopenfilename(
-                        parent=root, filetypes=tk_types
-                    )
+                    path = filedialog.askopenfilename(parent=root, filetypes=tk_types)
 
                 root.destroy()
                 return path or ""
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 carb.log_warn(f"[omnicool.webapp][browse] dialog error: {exc}")
                 return ""
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _run_dialog)
 
-    # -----------------
-    # WebSocket USD bridge
-    # -----------------
     def _start_ws(self):
         if self._ws_task:
             return
@@ -223,10 +201,7 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                             if msg.type == aiohttp.WSMsgType.TEXT:
                                 resp = await handle_ws_message(msg.data)
                                 await ws.send_str(json.dumps(resp))
-                            elif msg.type in (
-                                aiohttp.WSMsgType.ERROR,
-                                aiohttp.WSMsgType.CLOSE,
-                            ):
+                            elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
                                 break
                     except Exception as e:
                         carb.log_warn(f"[omnicool.webapp][ws] client handler ended: {e}")
@@ -243,9 +218,8 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                 self._ws_server = runner
 
                 carb.log_info(f"[omnicool.webapp][ws] Serving ws://{self._ws_host}:{self._ws_port}")
-
-                # Keep alive until cancelled
                 await asyncio.Future()
+
             except asyncio.CancelledError:
                 pass
             except Exception as e:
@@ -268,26 +242,9 @@ class OmnicoolWebAppExt(omni.ext.IExt):
             except Exception:
                 pass
             self._ws_task = None
-        # self._ws_server (AppRunner) is cleaned up in the task's finally block.
         self._ws_server = None
 
-    # -----------------
-    # Bridge WebSocket + WebRTC signaling (port 8001)
-    #
-    # The React webapp hard-codes ws://127.0.0.1:8001 for the bridge WS and
-    # http://127.0.0.1:8001/webrtc/offer for the Python WebRTC signaling.
-    # Both are served from a single aiohttp server on port 8001:
-    #   GET  /              → WebSocket bridge (Flownex protocol)
-    #   POST /webrtc/offer  → WebRTC SDP offer/answer exchange
-    #   GET  /webrtc/status → active WebRTC connection count
-    # -----------------
     def _start_bridge_ws(self):
-        """Start the combined aiohttp server used by the React webapp.
-
-        Serves the Flownex WebSocket bridge at the root path and the Python
-        WebRTC signaling endpoints at ``/webrtc/*``, all on the same port so
-        the compiled React app can reach both without extra configuration.
-        """
         if self._bridge_ws_task:
             return
 
@@ -299,10 +256,6 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                 import aiohttp
                 import aiohttp.web as web
 
-                # ----------------------------------------------------------
-                # Adapter: aiohttp WS uses send_str(); bridge_ws_handlers
-                # expects a plain send() coroutine on the socket object.
-                # ----------------------------------------------------------
                 class _WS:
                     def __init__(self, ws):
                         self._ws = ws
@@ -310,9 +263,6 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                     async def send(self, data: str) -> None:
                         await self._ws.send_str(data)
 
-                # ----------------------------------------------------------
-                # WebSocket bridge handler (GET /)
-                # ----------------------------------------------------------
                 async def ws_handler(request):
                     ws = web.WebSocketResponse()
                     await ws.prepare(request)
@@ -323,26 +273,14 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                         async for msg in ws:
                             if msg.type == aiohttp.WSMsgType.TEXT:
                                 await handle_bridge_message(msg.data, wrapped)
-                            elif msg.type in (
-                                aiohttp.WSMsgType.ERROR,
-                                aiohttp.WSMsgType.CLOSE,
-                            ):
+                            elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
                                 break
                     except Exception as e:
-                        carb.log_warn(
-                            f"[omnicool.webapp][bridge_ws] client handler ended: {e}"
-                        )
+                        carb.log_warn(f"[omnicool.webapp][bridge_ws] client handler ended: {e}")
                     finally:
-                        carb.log_info(
-                            "[omnicool.webapp][bridge_ws] client disconnected"
-                        )
+                        carb.log_info("[omnicool.webapp][bridge_ws] client disconnected")
                     return ws
 
-                # ----------------------------------------------------------
-                # WebRTC signaling handlers (POST /webrtc/offer,
-                #                            OPTIONS /webrtc/offer CORS,
-                #                            GET  /webrtc/status)
-                # ----------------------------------------------------------
                 _CORS_HEADERS = {
                     "Access-Control-Allow-Origin": "*",
                     "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -352,11 +290,6 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                 _webrtc_sessions: set = set()
 
                 async def cors_preflight_handler(request):
-                    """Handle the CORS preflight OPTIONS request the browser sends
-                    before POST /webrtc/offer when the page origin differs from the
-                    API origin (e.g. http://127.0.0.1:3001 → http://127.0.0.1:8001).
-                    Without this 200 response, the browser blocks the actual POST.
-                    """
                     return web.Response(status=200, headers=_CORS_HEADERS)
 
                 async def offer_handler(request):
@@ -394,9 +327,7 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                     def on_datachannel(channel):
                         @channel.on("message")
                         def on_message(message: str):
-                            asyncio.ensure_future(
-                                _handle_dc_message(channel, message)
-                            )
+                            asyncio.ensure_future(_handle_dc_message(channel, message))
 
                     @pc.on("connectionstatechange")
                     async def on_state():
@@ -422,9 +353,7 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                         if channel.readyState == "open":
                             channel.send(json.dumps(resp))
                     except Exception as e:
-                        carb.log_warn(
-                            f"[omnicool.webapp][bridge_ws/webrtc] dc message error: {e}"
-                        )
+                        carb.log_warn(f"[omnicool.webapp][bridge_ws/webrtc] dc message error: {e}")
 
                 async def status_handler(request):
                     return web.json_response(
@@ -432,9 +361,6 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                         headers=_CORS_HEADERS,
                     )
 
-                # ----------------------------------------------------------
-                # Build and start aiohttp app
-                # ----------------------------------------------------------
                 app = web.Application()
                 app.router.add_get("/", ws_handler)
                 app.router.add_route("OPTIONS", "/webrtc/offer", cors_preflight_handler)
@@ -453,7 +379,6 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                     f"and http://{self._bridge_ws_host}:{self._bridge_ws_port}/webrtc/offer"
                 )
 
-                # Keep alive until cancelled
                 await asyncio.Future()
 
             except asyncio.CancelledError:
@@ -478,25 +403,16 @@ class OmnicoolWebAppExt(omni.ext.IExt):
             except Exception:
                 pass
             self._bridge_ws_task = None
-        # self._bridge_ws_server (AppRunner) is cleaned up in the task's finally block.
         self._bridge_ws_server = None
 
-    # -----------------
-    # WebRTC signaling (aiortc — pure Python, same process as Kit)
-    # -----------------
     def _start_webrtc(self):
-        """Start the aiortc-based WebRTC signaling server in Kit's asyncio loop."""
         if self._webrtc_task:
             return
 
         async def _run():
             try:
-                self._webrtc_server = WebRTCSignalingServer(
-                    message_handler=handle_ws_message
-                )
-                await self._webrtc_server.start(
-                    host=self._webrtc_host, port=self._webrtc_port
-                )
+                self._webrtc_server = WebRTCSignalingServer(message_handler=handle_ws_message)
+                await self._webrtc_server.start(host=self._webrtc_host, port=self._webrtc_port)
                 carb.log_info(
                     f"[omnicool.webapp][webrtc] signaling server started — "
                     f"POST http://{self._webrtc_host}:{self._webrtc_port}/webrtc/offer"
@@ -521,7 +437,3 @@ class OmnicoolWebAppExt(omni.ext.IExt):
             except Exception:
                 pass
             self._webrtc_task = None
-
-    async def _handle_ws_message(self, msg: str) -> dict:
-        """Thin wrapper kept for backward compatibility with tests."""
-        return await handle_ws_message(msg)

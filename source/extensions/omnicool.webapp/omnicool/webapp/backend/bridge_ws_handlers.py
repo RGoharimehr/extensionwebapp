@@ -1,562 +1,190 @@
-from __future__ import annotations
-
-import asyncio
 import json
-import logging
-from typing import Any, Callable, Coroutine, Dict, Optional, Set
+import carb
 
 from omnicool.webapp.backend import config_store
-from omnicool.webapp.backend import flownex_bridge as _fb
+from omnicool.webapp.backend import flownex_bridge as bridge
 
-log = logging.getLogger(__name__)
-
-_clients: Set[Any] = set()
-_poll_task: asyncio.Task | None = None
-
-# Optional async callback registered by the host extension to open a native
-# file/directory picker.  Signature:
-#   async def _cb(mode: str, filters: list) -> str
-# where mode is "file" or "directory", filters is a list of
-# {"label": str, "extension": str} dicts, and the return value is the
-# selected path (empty string if cancelled).
-_browse_callback: Optional[Callable[..., Coroutine[Any, Any, str]]] = None
+_browse_callback = None
 
 
-def set_browse_callback(cb: Optional[Callable[..., Coroutine[Any, Any, str]]]) -> None:
-    """Register (or clear) the async browse-file callback.
-
-    The callback will be awaited when the frontend sends a
-    ``config.browse_file`` message.  Pass *None* to remove it.
-    """
+def set_browse_callback(cb):
     global _browse_callback
     _browse_callback = cb
 
 
-def _status_json(state: str, message: str = "", progress: float = 0.0) -> str:
-    return json.dumps({
-        "type": "status",
-        "payload": {
-            "state": state,
-            "message": message,
-            "progress": progress,
-        },
-    })
+def apply_saved_config():
+    try:
+        cfg = config_store.load_config()
+        if not cfg:
+            return
+
+        bridge.set_config(cfg)
+        carb.log_info("[bridge] applied saved config")
+    except Exception as e:
+        carb.log_warn(f"[bridge] failed to apply saved config: {e}")
 
 
-def _schema_json() -> str:
-    return json.dumps({
-        "type": "schema",
-        "payload": _fb.get_schema(),
-    })
-
-
-def _state_json() -> str:
-    bridge_status = _fb.get_status()
-    snap = _fb.get_state_snapshot()
-
-    if not bridge_status.get("available"):
-        status_payload = {
-            "state": "error",
-            "message": "Flownex not available on this machine.",
-            "progress": 0.0,
-        }
-    elif bridge_status.get("transientRunning"):
-        status_payload = {
-            "state": "running",
-            "message": "Transient simulation running.",
-            "progress": 0.0,
-        }
-    elif not bridge_status.get("projectAttached"):
-        status_payload = {
-            "state": "idle",
-            "message": "No project attached.",
-            "progress": 0.0,
-        }
-    else:
-        status_payload = {
-            "state": "idle",
-            "message": f"Project attached: {bridge_status.get('projectPath', '')}",
-            "progress": 1.0,
-        }
-
-    connected_project = snap.get("connected_project", "")
-    io_directory = snap.get("io_directory", "")
-
-    return json.dumps({
-        "type": "state",
-        "payload": {
-            "status": status_payload,
-            "connected_project": connected_project,
-            "io_directory": io_directory,
-            # Aliases expected by the frontend path-persistence IIFE so that
-            # paths are saved to localStorage whenever a state message arrives.
-            "savedProjectPath": connected_project,
-            "savedIoDir": io_directory,
-            "inputs": snap.get("inputs", {}),
-            "outputs": snap.get("outputs", {}),
-            "history": snap.get("history", []),
-            "transientRunning": snap.get("transientRunning", False),
-        },
-    })
-
-
-def _outputs_delta_messages(values: Dict[str, Any]) -> list[str]:
-    msgs: list[str] = []
-    for key, value in values.items():
-        msgs.append(json.dumps({
-            "type": "outputs_delta",
-            "payload": {
-                "key": key,
-                "value": value,
-            },
+async def handle_bridge_connect(ws):
+    try:
+        state = bridge.get_state_snapshot()
+        await ws.send(json.dumps({
+            "type": "state",
+            "payload": state
         }))
-    return msgs
+    except Exception as e:
+        carb.log_warn(f"[bridge] connect error: {e}")
 
 
-async def _broadcast(raw: str) -> None:
-    stale: list[Any] = []
-    for ws in list(_clients):
-        try:
-            await ws.send(raw)
-        except Exception:
-            stale.append(ws)
-
-    for ws in stale:
-        _clients.discard(ws)
-
-
-async def _broadcast_outputs(values: Dict[str, Any]) -> None:
-    for raw in _outputs_delta_messages(values):
-        await _broadcast(raw)
-    await _broadcast(_state_json())
-
-
-async def _poll_outputs_loop() -> None:
-    global _poll_task
-    _consecutive_errors: int = 0
-    _MAX_CONSECUTIVE_ERRORS: int = 5
+async def handle_bridge_message(message: str, ws):
     try:
-        while _fb.is_transient_running():
-            await asyncio.sleep(_fb.get_poll_interval())
+        data = json.loads(message)
+        msg_type = data.get("type")
+        payload = data.get("payload", {})
+        msg_id = data.get("id")
 
-            result = _fb.read_outputs()
-            if result.get("ok"):
-                _consecutive_errors = 0
-                await _broadcast_outputs(result.get("outputs", {}))
+        result = None
 
-                usd_sync = result.get("usdSync") or {}
-                if usd_sync.get("updatedPrims"):
-                    await _broadcast(_status_json(
-                        "running",
-                        f"Transient poll: updated {usd_sync.get('updatedPrims', 0)} USD prim(s).",
-                        0.0,
-                    ))
-            else:
-                _consecutive_errors += 1
-                log.warning(
-                    "[bridge_ws] poll cycle error (%d/%d): %s",
-                    _consecutive_errors,
-                    _MAX_CONSECUTIVE_ERRORS,
-                    result.get("message", "Unknown error"),
-                )
-                await _broadcast(_status_json(
-                    "running",
-                    f"Poll error ({_consecutive_errors}/{_MAX_CONSECUTIVE_ERRORS}): "
-                    + result.get("message", "Failed to poll outputs."),
-                    0.0,
-                ))
-                if _consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
-                    log.warning(
-                        "[bridge_ws] stopping transient poll after %d consecutive errors.",
-                        _consecutive_errors,
-                    )
-                    await _broadcast(_status_json(
-                        "error",
-                        f"Transient polling stopped after {_consecutive_errors} consecutive errors: "
-                        + result.get("message", ""),
-                        0.0,
-                    ))
-                    break
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        log.warning("[bridge_ws] polling loop error: %s", exc)
-        await _broadcast(_status_json("error", str(exc), 0.0))
-    finally:
-        _poll_task = None
+        # -------------------------------------
+        # CONFIG / CONNECT
+        # -------------------------------------
+        if msg_type == "configure":
+            project = payload.get("projectFile", "")
+            io_dir = payload.get("ioDirectory", "")
+            poll_interval = payload.get("resultPollingInterval", 1.0)
 
+            cfg = {
+                "projectFile": project,
+                "ioDirectory": io_dir,
+                "resultPollingInterval": poll_interval,
+            }
 
-async def _ensure_poll_task() -> None:
-    global _poll_task
-    if _poll_task is None or _poll_task.done():
-        _poll_task = asyncio.create_task(_poll_outputs_loop())
+            config_store.save_config(cfg)
+            bridge.set_config(cfg)
 
+            result = {
+                "status": "configured",
+                "config": cfg,
+            }
 
-async def _stop_poll_task() -> None:
-    global _poll_task
-    if _poll_task is not None:
-        _poll_task.cancel()
-        try:
-            await _poll_task
-        except BaseException:
-            pass
-        _poll_task = None
+        elif msg_type == "open_flownex":
+            result = bridge.open_flownex()
 
+        elif msg_type == "close_flownex":
+            result = bridge.exit_app()
 
-async def handle_bridge_connect(websocket: Any) -> None:
-    _clients.add(websocket)
-    try:
-        await websocket.send(_schema_json())
-        await websocket.send(_state_json())
-    except Exception as exc:  # noqa: BLE001
-        log.warning("[bridge_ws] on_connect send error: %s", exc)
-        _clients.discard(websocket)
+        elif msg_type == "open_project":
+            result = bridge.open_project()
 
+        elif msg_type == "connect":
+            open_app_result = bridge.open_flownex()
+            open_project_result = bridge.open_project()
+            result = {
+                "status": "connected",
+                "open_flownex": open_app_result,
+                "open_project": open_project_result,
+            }
 
-async def handle_bridge_message(msg: str, websocket: Any) -> None:
-    try:
-        data = json.loads(msg)
-    except Exception:  # noqa: BLE001
-        return
-
-    _clients.add(websocket)
-
-    typ: str = data.get("type", "")
-    payload: Dict[str, Any] = data.get("payload") or {}
-
-    try:
-        if typ == "configure":
-            project_path = str(payload.get("projectPath", "") or "")
-            io_dir = str(payload.get("ioDir", "") or "")
-            backend = str(payload.get("backend", "flownex") or "flownex")
-
-            # Persist whatever the user provided to the JSON config file so
-            # the values survive an extension restart regardless of whether
-            # the Flownex runtime is available right now.
-            save_patch: Dict[str, Any] = {}
-            if project_path:
-                save_patch["projectFile"] = project_path
-            if io_dir:
-                save_patch["ioDirectory"] = io_dir
-            if "solveOnChange" in payload:
-                save_patch["solveOnChange"] = bool(payload.get("solveOnChange"))
-            if "resultPollingInterval" in payload:
-                try:
-                    save_patch["resultPollingInterval"] = float(
-                        payload.get("resultPollingInterval") or 1.0
-                    )
-                except (TypeError, ValueError):
-                    pass
-            if save_patch:
-                config_store.save(save_patch)
-
-            patch: Dict[str, Any] = {}
-            if project_path:
-                patch["flownexProject"] = project_path
-            if io_dir:
-                patch["ioFileDirectory"] = io_dir
-            if "solveOnChange" in payload:
-                patch["solveOnChange"] = bool(payload.get("solveOnChange"))
-            if "resultPollingInterval" in payload:
-                patch["resultPollingInterval"] = payload.get("resultPollingInterval")
-
-            if patch:
-                result = _fb.set_config(patch)
-                if "error" in result:
-                    await websocket.send(_status_json("error", result["error"], 0.0))
-                    return
-
-            await websocket.send(_status_json(
-                "idle",
-                f"Configured — project: {project_path!r}  ioDir: {io_dir!r}  backend: {backend!r}",
-                0.0,
-            ))
-            await websocket.send(_schema_json())
-            await websocket.send(_state_json())
-
-        elif typ == "open_flownex":
-            await websocket.send(_status_json("running", "Opening Flownex…", 0.1))
-            result = _fb.open_flownex()
-            await websocket.send(_status_json(
-                "idle" if result.get("ok") else "error",
-                result.get("message", ""),
-                1.0 if result.get("ok") else 0.0,
-            ))
-            await websocket.send(_state_json())
-
-        elif typ == "open_project":
-            await websocket.send(_status_json("running", "Opening project…", 0.1))
-            result = _fb.open_project()
-            await websocket.send(_status_json(
-                "idle" if result.get("ok") else "error",
-                result.get("message", ""),
-                1.0 if result.get("ok") else 0.0,
-            ))
-            await websocket.send(_schema_json())
-            await websocket.send(_state_json())
-
-        elif typ == "close_project":
-            await _stop_poll_task()
-            result = _fb.close_project()
-            await websocket.send(_status_json(
-                "idle" if result.get("ok") else "error",
-                result.get("message", ""),
-                1.0 if result.get("ok") else 0.0,
-            ))
-            await websocket.send(_state_json())
-
-        elif typ == "close_app":
-            await _stop_poll_task()
-            result = _fb.exit_app()
-            await websocket.send(_status_json(
-                "idle" if result.get("ok") else "error",
-                result.get("message", ""),
-                1.0 if result.get("ok") else 0.0,
-            ))
-            await websocket.send(_state_json())
-
-        elif typ == "get_state":
-            await websocket.send(_state_json())
-            await websocket.send(_schema_json())
-
-        elif typ == "set_input":
-            scope = str(payload.get("scope", "") or "")
-            key = str(payload.get("key", "") or "")
+        # -------------------------------------
+        # INPUTS
+        # -------------------------------------
+        elif msg_type == "set_input":
+            scope = payload.get("scope", "")
+            key = payload.get("key", "")
             value = payload.get("value")
+            result = bridge.set_input_value(scope, key, value)
 
-            result = _fb.set_input_value(scope, key, value)
+        # -------------------------------------
+        # SIMULATION
+        # -------------------------------------
+        elif msg_type == "run":
+            result = bridge.run_steady()
 
-            await websocket.send(json.dumps({
-                "type": "inputs_delta",
-                "payload": {
-                    "scope": scope,
-                    "key": key,
-                    "value": value,
-                },
-            }))
+        elif msg_type == "load_defaults":
+            result = bridge.load_defaults()
 
-            if not result.get("ok"):
-                await websocket.send(_status_json(
-                    "error",
-                    result.get("message", "Failed to set input."),
-                    0.0,
-                ))
+        elif msg_type == "load_defaults_and_run":
+            load_result = bridge.load_defaults()
+            run_result = bridge.run_steady()
+            result = {
+                "status": "defaults_loaded_and_run",
+                "load_defaults": load_result,
+                "run_steady": run_result,
+            }
+
+        elif msg_type == "start_transient":
+            result = bridge.start_transient()
+
+        elif msg_type == "stop_transient":
+            result = bridge.stop_transient()
+
+        elif msg_type == "read_outputs":
+            result = bridge.read_outputs()
+
+        # -------------------------------------
+        # STATE / SCHEMA
+        # -------------------------------------
+        elif msg_type == "get_state":
+            result = bridge.get_state_snapshot()
+
+        elif msg_type == "get_schema":
+            result = {"schema": bridge.get_schema()}
+
+        # -------------------------------------
+        # FILE BROWSER
+        # -------------------------------------
+        elif msg_type == "browse_file":
+            if _browse_callback:
+                mode = payload.get("mode", "file")
+                filters = payload.get("filters", [])
+                path = await _browse_callback(mode, filters)
+                result = {"path": path}
             else:
-                await websocket.send(_status_json(
-                    "idle",
-                    result.get("message", ""),
-                    0.0,
-                ))
+                result = {
+                    "error": "Browse is not available in this environment. Paste path manually."
+                }
 
-                cfg = _fb.get_config()
-                if bool(cfg.get("solveOnChange", False)) and scope in ("dynamic", "static"):
-                    await websocket.send(_status_json(
-                        "running",
-                        "Running steady-state simulation…",
-                        0.1,
-                    ))
-                    solve_result = _fb.run_steady()
-                    await websocket.send(_status_json(
-                        "idle" if solve_result.get("ok") else "error",
-                        solve_result.get("message", ""),
-                        1.0 if solve_result.get("ok") else 0.0,
-                    ))
-                    if solve_result.get("ok"):
-                        await _broadcast_outputs(solve_result.get("outputs", {}))
+        # -------------------------------------
+        # MAPPING / USD
+        # -------------------------------------
+        elif msg_type == "generate_mapping_config":
+            from omnicool.webapp.backend.flownex_attr_tools import generate_mapping_config
+            generate_mapping_config()
+            result = {"status": "mapping_generated"}
 
-        elif typ == "run":
-            mode = str(payload.get("mode", "steady") or "steady")
-            if mode == "steady":
-                await websocket.send(_status_json(
-                    "running",
-                    "Running steady-state simulation…",
-                    0.1,
-                ))
-                result = _fb.run_steady()
-                await websocket.send(_status_json(
-                    "idle" if result.get("ok") else "error",
-                    result.get("message", ""),
-                    1.0 if result.get("ok") else 0.0,
-                ))
-                if result.get("ok"):
-                    await _broadcast_outputs(result.get("outputs", {}))
+        elif msg_type == "prim_property_override":
+            from omnicool.webapp.backend.flownex_attr_tools import add_flownex_attributes
+
+            prim_path = payload.get("primPath")
+            if prim_path:
+                add_flownex_attributes(prim_path)
+                result = {"status": "attribute_added", "primPath": prim_path}
             else:
-                await websocket.send(_status_json(
-                    "error",
-                    f"Unsupported run mode: {mode!r}",
-                    0.0,
-                ))
+                result = {"error": "missing primPath"}
 
-        elif typ == "load_defaults":
-            # Load default input values from vendor IO definitions without
-            # running a simulation.  Broadcasts inputs_delta for each key so
-            # the frontend sliders snap to their defaults.
-            result = _fb.load_defaults()
-            await websocket.send(_status_json(
-                "idle" if result.get("ok") else "error",
-                result.get("message", "Loaded default inputs."),
-                1.0 if result.get("ok") else 0.0,
-            ))
-            if result.get("ok"):
-                for scope, values in (result.get("inputs") or {}).items():
-                    for key, value in (values or {}).items():
-                        await websocket.send(json.dumps({
-                            "type": "inputs_delta",
-                            "payload": {
-                                "scope": scope,
-                                "key": key,
-                                "value": value,
-                            },
-                        }))
-            await websocket.send(_state_json())
+        else:
+            result = {"error": f"Unknown message type: {msg_type}"}
 
-        elif typ == "load_defaults_and_run_steady":
-            await websocket.send(_status_json(
-                "running",
-                "Loading defaults and solving steady state…",
-                0.1,
-            ))
-            result = _fb.load_defaults_and_run_steady()
-            await websocket.send(_status_json(
-                "idle" if result.get("ok") else "error",
-                result.get("message", ""),
-                1.0 if result.get("ok") else 0.0,
-            ))
+        response = {
+            "type": "response",
+            "payload": result,
+        }
+        if msg_id:
+            response["id"] = msg_ids
 
-            if result.get("ok"):
-                for scope, values in _fb.get_input_values().items():
-                    for key, value in values.items():
-                        await websocket.send(json.dumps({
-                            "type": "inputs_delta",
-                            "payload": {
-                                "scope": scope,
-                                "key": key,
-                                "value": value,
-                            },
-                        }))
-                await _broadcast_outputs(result.get("outputs", {}))
+        await ws.send(json.dumps(response))
 
-        elif typ == "start_transient":
-            await websocket.send(_status_json(
-                "running",
-                "Starting transient simulation…",
-                0.1,
-            ))
-            result = _fb.start_transient()
-            await websocket.send(_status_json(
-                "running" if result.get("ok") else "error",
-                result.get("message", ""),
-                0.0,
-            ))
-            if result.get("ok"):
-                await _ensure_poll_task()
-                await websocket.send(_state_json())
-
-        elif typ == "stop_transient":
-            result = _fb.stop_transient()
-            await _stop_poll_task()
-            await websocket.send(_status_json(
-                "idle" if result.get("ok") else "error",
-                result.get("message", ""),
-                1.0 if result.get("ok") else 0.0,
-            ))
-
-            outputs_result = _fb.read_outputs()
-            outputs = outputs_result.get("outputs", {})
-            if outputs:
-                await _broadcast_outputs(outputs)
-            else:
-                await websocket.send(_state_json())
-
-        elif typ == "connect":
-            project_path = str(payload.get("projectPath", "") or "")
-            io_dir = str(payload.get("ioDir", "") or "")
-
-            # Persist the paths to JSON for cross-session recovery.
-            save_patch = {}
-            if project_path:
-                save_patch["projectFile"] = project_path
-            if io_dir:
-                save_patch["ioDirectory"] = io_dir
-            if save_patch:
-                config_store.save(save_patch)
-
-            patch = {}
-            if project_path:
-                patch["flownexProject"] = project_path
-            if io_dir:
-                patch["ioFileDirectory"] = io_dir
-
-            if patch:
-                result = _fb.set_config(patch)
-                if "error" in result:
-                    await websocket.send(_status_json("error", result["error"], 0.0))
-                    return
-
-            await websocket.send(_status_json("running", "Connecting to project…", 0.1))
-            result = _fb.open_project()
-            await websocket.send(_status_json(
-                "idle" if result.get("ok") else "error",
-                result.get("message", ""),
-                1.0 if result.get("ok") else 0.0,
-            ))
-            await websocket.send(_schema_json())
-            await websocket.send(_state_json())
-
-        elif typ == "config.browse_file":
-            # The frontend sends this when the user clicks a "..." path-browse
-            # button.  We delegate to the registered async callback (if any) to
-            # open a native OS file / directory picker, then respond with a
-            # browse_result message so the frontend can populate the input.
-            req_id = str(data.get("id", "") or payload.get("requestId", ""))
-            mode = str(payload.get("mode", "file") or "file")
-            filters = payload.get("filters") or []
-
-            path = ""
-            if _browse_callback is not None:
-                try:
-                    path = await _browse_callback(mode, filters) or ""
-                except Exception as browse_exc:  # noqa: BLE001
-                    log.warning("[bridge_ws] browse_file callback error: %s", browse_exc)
-
-            await websocket.send(json.dumps({
-                "type": "browse_result",
-                "payload": {
-                    "requestId": req_id,
-                    "path": path,
-                },
-            }))
-
-    except Exception as exc:  # noqa: BLE001
-        log.warning("[bridge_ws] handler error for type=%r: %s", typ, exc)
         try:
-            await websocket.send(_status_json("error", str(exc), 0.0))
-        except Exception:
-            pass
+            state = bridge.get_state_snapshot()
+            await ws.send(json.dumps({
+                "type": "state",
+                "payload": state
+            }))
+        except Exception as e:
+            carb.log_warn(f"[bridge] failed to push state: {e}")
 
-
-def apply_saved_config() -> None:
-    """Apply the persisted JSON config to flownex_bridge (best effort).
-
-    Called at extension startup so that the saved project path and IO
-    directory are pre-loaded into the FlownexIO configuration object as soon
-    as possible.  If the Flownex runtime is not available the call silently
-    does nothing; the user will need to click *Apply Configure* once Flownex
-    is running.
-    """
-    saved = config_store.load()
-    patch: Dict[str, Any] = {}
-    if saved.get("projectFile"):
-        patch["flownexProject"] = saved["projectFile"]
-    if saved.get("ioDirectory"):
-        patch["ioFileDirectory"] = saved["ioDirectory"]
-    if "solveOnChange" in saved:
-        patch["solveOnChange"] = saved["solveOnChange"]
-    if "resultPollingInterval" in saved:
-        patch["resultPollingInterval"] = saved["resultPollingInterval"]
-    if patch:
-        try:
-            _fb.set_config(patch)
-            log.info("[bridge_ws] applied saved config from JSON: %s", list(patch.keys()))
-        except Exception as exc:  # noqa: BLE001
-            log.debug("[bridge_ws] apply_saved_config: %s", exc)
+    except Exception as e:
+        carb.log_error(f"[bridge] message handling failed: {e}")
+        await ws.send(json.dumps({
+            "type": "error",
+            "payload": str(e)
+        }))
