@@ -48,6 +48,58 @@ def _safe_float(v: Any) -> Optional[float]:
         return None
 
 
+def _normalize_output_value(v: Any) -> Optional[float]:
+    """Convert a vendor output value to a safe JSON-serializable float or None.
+
+    The vendor ``GetPropertyValueUnit`` / ``GetPropertyValue`` methods may
+    return:
+    - ``None``                     → kept as ``None``
+    - a numeric type or numeric str → converted to ``float``
+    - an error message string       → treated as ``None`` (logged once upstream)
+    - any other non-numeric type   → treated as ``None``
+
+    This function never raises.
+    """
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        try:
+            f = float(v)
+            return f if f == f else None  # reject NaN
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if isinstance(v, str):
+        # Empty string or obvious error-message prefix → not a number
+        stripped = v.strip()
+        if not stripped:
+            return None
+        try:
+            return float(stripped)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _is_potentially_truncated_prop_id(prop_id: str) -> bool:
+    """Return True if ``prop_id`` looks like it was truncated by a CSV-quoting problem.
+
+    Flownex PropertyIdentifier values often use the form::
+
+        {Flow Element Results,Upstream}Total pressure
+
+    The comma inside the curly braces means the field MUST be double-quoted in
+    the CSV file.  If the field was NOT quoted, ``csv.DictReader`` splits at the
+    comma and the PropertyIdentifier is silently truncated to something like::
+
+        {Flow Element Results
+
+    We detect this by checking for an opening ``{`` that is never closed.
+    """
+    if not prop_id:
+        return False
+    return "{" in prop_id and "}" not in prop_id
+
+
 def _enumish_to_str(v: Any) -> str:
     if v is None:
         return ""
@@ -220,9 +272,17 @@ def _set_property_from_definition(defn: Dict[str, Any], value: Any) -> None:
         api.SetPropertyValue(component, prop, str(value))
 
 
-def _read_output_from_definition(defn: Dict[str, Any]) -> Any:
-    """
-    Uses the real FNXApi methods only.
+def _read_output_from_definition(defn: Dict[str, Any]) -> Optional[float]:
+    """Read a single output value from the vendor API and return a safe float.
+
+    The vendor ``GetPropertyValueUnit`` method is known to return error-message
+    strings (e.g. ``"Error parsing property value: unknown unit group ..."``
+    instead of ``None``) when unit conversion fails.  We must normalize those
+    values here, in our adapter layer, without modifying the vendor file.
+
+    Returns:
+        A finite ``float``, or ``None`` if the value is unavailable, invalid,
+        or an error string.  Never raises.
     """
     api = _get_api()
     if api is None or getattr(api, "AttachedProject", None) is None:
@@ -237,15 +297,18 @@ def _read_output_from_definition(defn: Dict[str, Any]) -> Any:
 
     try:
         if unit:
-            return api.GetPropertyValueUnit(component, prop, unit)
+            raw = api.GetPropertyValueUnit(component, prop, unit)
+        else:
+            raw = api.GetPropertyValue(component, prop)
 
-        raw = api.GetPropertyValue(component, prop)
-        if raw is None:
-            return None
-        try:
-            return float(raw)
-        except Exception:
-            return raw
+        normalized = _normalize_output_value(raw)
+        if normalized is None and raw is not None:
+            # Vendor returned something non-numeric (e.g. an error string).
+            log.warning(
+                "[flownex_bridge] non-numeric vendor value for %s.%s: %r — treating as None",
+                component, prop, raw,
+            )
+        return normalized
     except Exception as exc:  # noqa: BLE001
         log.warning("[flownex_bridge] failed reading %s.%s: %s", component, prop, exc)
         return None
@@ -482,6 +545,25 @@ def load_outputs() -> List[Dict[str, Any]]:
     try:
         items = io.LoadOutputs() or []
         out = [_output_def_to_dict(o) for o in items]
+
+        # Warn about outputs whose PropertyIdentifier looks truncated because
+        # the Outputs.csv was not properly quoted.  Flownex PropertyIdentifier
+        # values frequently contain commas inside curly braces, e.g.:
+        #   {Flow Element Results,Upstream}Total pressure
+        # That field MUST be double-quoted in the CSV.  Without quoting,
+        # csv.DictReader splits at the comma and the identifier is silently
+        # truncated (e.g. to "{Flow Element Results"), making the output
+        # unreadable.
+        for defn in out:
+            prop_id = defn.get("propertyIdentifier", "")
+            if _is_potentially_truncated_prop_id(prop_id):
+                log.warning(
+                    "[flownex_bridge] output %r has a PropertyIdentifier that looks "
+                    "truncated (%r).  Check that Outputs.csv double-quotes fields "
+                    "containing commas (e.g. \"{Flow Element Results,Upstream}...\").",
+                    defn.get("key", "?"), prop_id,
+                )
+
         _cache_output_defs(out)
         return out
     except Exception as exc:  # noqa: BLE001
@@ -491,8 +573,17 @@ def load_outputs() -> List[Dict[str, Any]]:
 
 
 def get_schema() -> Dict[str, Any]:
+    dyn = load_inputs() or []
+    sta = load_static_inputs() or []
+    # Tag each input definition with its scope so the frontend can send the
+    # correct scope when calling set_input.  We do this in our wrapper layer
+    # (not in the vendor definitions) to avoid modifying vendor files.
+    for d in dyn:
+        d["scope"] = "dynamic"
+    for d in sta:
+        d["scope"] = "static"
     return {
-        "inputs": (load_inputs() or []) + (load_static_inputs() or []),
+        "inputs": dyn + sta,
         "outputs": load_outputs() or [],
     }
 
@@ -653,17 +744,31 @@ def read_outputs() -> Dict[str, Any]:
             "usdSync": {"updatedPrims": 0, "matchedComponents": 0, "skippedOutputs": 0},
         }
 
-    try:
-        for key, defn in defs.items():
+    # Read each output independently so a single bad value never prevents the
+    # rest from being broadcast.  _read_output_from_definition already logs a
+    # warning for vendor error strings and returns None; we mirror that here
+    # for unexpected per-key exceptions.
+    read_errors: int = 0
+    for key, defn in defs.items():
+        try:
             outputs[key] = _read_output_from_definition(defn)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[flownex_bridge] read_outputs: skipping output %r due to error: %s", key, exc)
+            outputs[key] = None
+            read_errors += 1
 
+    try:
         _output_values.update(outputs)
         _append_history(outputs)
         usd_sync = _sync_outputs_to_usd(outputs)
 
+        msg = "Outputs refreshed."
+        if read_errors:
+            msg = f"Outputs refreshed ({read_errors} output(s) skipped due to read errors)."
+
         return {
             "ok": True,
-            "message": "Outputs refreshed.",
+            "message": msg,
             "outputs": dict(outputs),
             "usdSync": usd_sync,
         }
@@ -672,7 +777,7 @@ def read_outputs() -> Dict[str, Any]:
         return {
             "ok": False,
             "message": str(exc),
-            "outputs": {},
+            "outputs": dict(outputs),
             "usdSync": {"updatedPrims": 0, "matchedComponents": 0, "skippedOutputs": 0},
         }
 

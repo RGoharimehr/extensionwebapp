@@ -15,31 +15,6 @@ class _StaticHandler(SimpleHTTPRequestHandler):
         carb.log_info("[omnicool.webapp][http] " + (fmt % args))
 
 
-async def _ensure_websockets_installed():
-    """
-    Ensures the ``websockets`` library is available, installing it via
-    ``omni.kit.pipapi`` on first use if necessary.
-    """
-    try:
-        import websockets  # noqa: F401
-        return
-    except Exception:
-        pass
-
-    try:
-        import omni.kit.pipapi as pipapi
-        carb.log_warn("[omnicool.webapp][ws] 'websockets' not found. Installing via pip...")
-        pipapi.install("websockets==12.0")
-        import websockets  # noqa: F401
-        carb.log_info("[omnicool.webapp][ws] 'websockets' installed successfully.")
-    except Exception as e:
-        carb.log_error(
-            "[omnicool.webapp][ws] Failed to import/install 'websockets'. "
-            f"WS bridge will NOT start. Error: {e}"
-        )
-        raise
-
-
 async def _ensure_aiohttp_installed():
     """
     Ensures the ``aiohttp`` library is available, installing it via
