@@ -25,8 +25,6 @@ Validated behaviours
    is missing (not swallowed).
 """
 
-import json
-
 import omni.kit.test
 from pxr import Usd, UsdGeom
 
@@ -39,15 +37,6 @@ def _make_stage_with_cube():
     stage = Usd.Stage.CreateInMemory()
     UsdGeom.Cube.Define(stage, "/World/Cube")
     return stage
-
-
-def _run_ws_handler_sync(ext, msg: dict) -> dict:
-    """Drive ``_handle_ws_message`` from a synchronous test context."""
-    import asyncio
-    loop = asyncio.get_event_loop()
-    return loop.run_until_complete(
-        ext._handle_ws_message(json.dumps(msg))
-    )
 
 
 # ---------------------------------------------------------------------------

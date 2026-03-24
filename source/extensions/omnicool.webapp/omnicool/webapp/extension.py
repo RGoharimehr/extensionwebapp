@@ -438,6 +438,3 @@ class OmnicoolWebAppExt(omni.ext.IExt):
                 pass
             self._webrtc_task = None
 
-    async def _handle_ws_message(self, msg: str) -> dict:
-        """Thin wrapper kept for backward compatibility with tests."""
-        return await handle_ws_message(msg)
