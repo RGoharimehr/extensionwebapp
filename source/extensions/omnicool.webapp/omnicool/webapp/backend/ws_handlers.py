@@ -45,6 +45,98 @@ async def handle_ws_message(msg: str) -> dict:
 
     try:
         # -----------------------------------------------------------------
+        # Legacy AppStream prim query message
+        # Sent by the WebRTC HUD logic in App.js through the data channel:
+        # {
+        #   "type": "get_prim_property",
+        #   "prim_path": "",
+        #   "pick": {"x": 0.5, "y": 0.5}
+        # }
+        #
+        # Mapping is read from USD:
+        #   flownex:componentName
+        #
+        # Live values are also read from USD:
+        #   flownex:volumetricFlowrate
+        #   flownex:pressure
+        #   flownex:temperature
+        #   flownex:massFlowrate
+        #   flownex:quality
+        #   flownex:density
+        #   flownex:T_Case
+        #
+        # Response:
+        # {
+        #   "type": "prim_property_result",
+        #   "prim_path": "...",
+        #   "component": "...",
+        #   "outputs": {...}
+        # }
+        # -----------------------------------------------------------------
+        if typ == "get_prim_property":
+            stage = _stage()
+            if stage is None:
+                return {
+                    "type": "prim_property_result",
+                    "prim_path": None,
+                    "component": None,
+                    "outputs": {},
+                    "error": "No USD stage available",
+                }
+
+            prim_path = str(data.get("prim_path", "") or "")
+            pick = data.get("pick") or {}
+
+            if not prim_path:
+                try:
+                    norm_x = float(pick.get("x", 0.0))
+                    norm_y = float(pick.get("y", 0.0))
+                    prim_path = _pick_prim_path(norm_x, norm_y) or ""
+                except Exception:
+                    prim_path = ""
+
+            if not prim_path:
+                return {
+                    "type": "prim_property_result",
+                    "prim_path": None,
+                    "component": None,
+                    "outputs": {},
+                }
+
+            component_name = None
+            try:
+                component_name = _get_attr(stage, prim_path, "flownex:componentName")
+                component_name = _json_safe(component_name)
+            except Exception:
+                component_name = None
+
+            usd_props = [
+                "flownex:volumetricFlowrate",
+                "flownex:pressure",
+                "flownex:temperature",
+                "flownex:massFlowrate",
+                "flownex:quality",
+                "flownex:density",
+                "flownex:T_Case",
+            ]
+
+            outputs = {}
+            for attr_name in usd_props:
+                try:
+                    val = _get_attr(stage, prim_path, attr_name)
+                    if val is not None:
+                        outputs[attr_name] = _json_safe(val)
+                except Exception:
+                    pass
+
+            return {
+                "type": "prim_property_result",
+                "prim_path": prim_path,
+                "component": component_name,
+                "outputs": outputs,
+            }
+
+        # -----------------------------------------------------------------
         # Flownex bridge commands — no USD stage required
         # These must be dispatched before the stage guard below.
         # -----------------------------------------------------------------
@@ -144,7 +236,16 @@ async def handle_ws_message(msg: str) -> dict:
         if typ == "flownex.run_steady":
             result = _fb.run_steady()
             if result.get("ok"):
+                stage = _stage()
+                outputs_result = _fb.read_outputs()
+                outputs = outputs_result.get("outputs", {}) if outputs_result else {}
+
+                if stage is not None and outputs:
+                    from omnicool.webapp.backend.flownex_results import sync_flownex_outputs_to_usd
+                    sync_flownex_outputs_to_usd(stage, outputs)
+
                 return {"id": req_id, "ok": True, "payload": result}
+
             return {
                 "id": req_id,
                 "ok": False,
@@ -187,7 +288,13 @@ async def handle_ws_message(msg: str) -> dict:
         if typ == "flownex.read_outputs":
             result = _fb.read_outputs()
             if result.get("ok"):
+                stage = _stage()
+                if stage is not None:
+                    from omnicool.webapp.backend.flownex_results import sync_flownex_outputs_to_usd
+                    sync_flownex_outputs_to_usd(stage, result.get("outputs", {}))
+
                 return {"id": req_id, "ok": True, "payload": result}
+
             return {
                 "id": req_id,
                 "ok": False,
@@ -295,9 +402,37 @@ async def handle_ws_message(msg: str) -> dict:
             return {"id": req_id, **result}
 
         # -----------------------------------------------------------------
-        # Flownex stage-wide operations (no specific prim path required)
-        # These must come BEFORE the prim-validated flownex.* block below.
+        # Visualization (reads values directly from USD attrs)
         # -----------------------------------------------------------------
+        if typ == "visualize_property":
+            from omnicool.webapp.backend.viz_utils import visualize_property_layer
+
+            prop = payload.get("property", "")
+            if not prop:
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": "Missing property",
+                }
+
+            try:
+                result = visualize_property_layer(prop)
+                return {
+                    "id": req_id,
+                    "ok": True,
+                    "payload": {
+                        "status": "visualized",
+                        "property": prop,
+                        "result": result,
+                    },
+                }
+            except Exception as e:
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": str(e),
+                }
+
         if typ == "flownex.deinstance_and_add":
             root = payload.get("root", "/World")
             msg_txt = _fat.deinstance_and_add_flownex(root=root)

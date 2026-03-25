@@ -51,3 +51,12 @@ deps/**/user.toml
 __pycache__/
 *.pyc
 *.pyo
+
+# Flownex runtime-generated user settings and IO files
+FlownexUser.json
+Inputs.csv
+Outputs.csv
+StaticInputs.csv
+
+# User-specific connection settings (project path, IO directory, etc.)
+omnicool_config.json

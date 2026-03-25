@@ -1,0 +1,837 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width,initial-scale=1"/>
+    <meta name="theme-color" content="#000000"/>
+    <meta name="description" content="WebRTC React Application"/>
+    <title>WebRTC React App</title>
+    <script defer="defer" src="/static/js/main.27268f8b.js"></script>
+    <link href="/static/css/main.7785cb87.css" rel="stylesheet">
+  </head>
+  <body>
+    <noscript>You need to enable JavaScript to run this app.</noscript>
+    <div id="root"></div>
+
+    <!-- == Omnicool USD bridge patch ======================================
+         Opens a direct WebSocket connection to the Kit extension (port 8899),
+         exposes window.__omniUsdSend(type, payload) -> Promise, and wires the
+         Results Mapping "Start Prim Property Override" button so it actually
+         calls the backend (flownex.deinstance_and_add).
+    ===================================================================== -->
+    <script>
+    (function () {
+      var USD_WS_URL = 'ws://127.0.0.1:8899';
+      var _ws = null, _msgId = 0, _pending = {};
+
+      function _getWs() {
+        if (_ws && (_ws.readyState === 0 || _ws.readyState === 1)) return _ws;
+        try { _ws = new WebSocket(USD_WS_URL); } catch (e) { _ws = null; return null; }
+        _ws.onmessage = function (evt) {
+          var msg; try { msg = JSON.parse(evt.data); } catch (e) { return; }
+          var cb = _pending[msg.id];
+          if (cb) { delete _pending[msg.id]; msg.ok ? cb.resolve(msg.payload) : cb.reject(new Error(msg.error || 'USD WS error')); }
+        };
+        _ws.onerror = _ws.onclose = function () { _ws = null; };
+        return _ws;
+      }
+
+      window.__omniUsdSend = function (type, payload) {
+        return new Promise(function (resolve, reject) {
+          var sock = _getWs();
+          if (!sock) { reject(new Error('USD WS unavailable')); return; }
+          var id = String(++_msgId);
+          _pending[id] = { resolve: resolve, reject: reject };
+          setTimeout(function () {
+            if (_pending[id]) { delete _pending[id]; reject(new Error('USD WS timeout')); }
+          }, 30000);
+          function doSend() {
+            try { sock.send(JSON.stringify({ id: id, type: type, payload: payload || {} })); }
+            catch (e) { delete _pending[id]; reject(e); }
+          }
+          if (sock.readyState === 1) { doSend(); }
+          else if (sock.readyState === 0) {
+            sock.addEventListener('open',  doSend, { once: true });
+            sock.addEventListener('error', function () { delete _pending[id]; reject(new Error('USD WS connection failed')); }, { once: true });
+          } else { delete _pending[id]; reject(new Error('USD WS closed')); }
+        });
+      };
+
+      function _showToast(msg, isError) {
+        var t = document.getElementById('__omni-rm-toast');
+        if (!t) {
+          t = document.createElement('div');
+          t.id = '__omni-rm-toast';
+          t.style.cssText = 'position:fixed;bottom:24px;right:24px;z-index:99999;padding:10px 18px;border-radius:6px;font-size:13px;font-family:Segoe UI,system-ui,sans-serif;max-width:480px;word-break:break-word;transition:opacity .4s;pointer-events:none;color:#fff';
+          document.body.appendChild(t);
+        }
+        t.textContent = msg;
+        t.style.background = isError ? '#b71c1c' : '#1b5e20';
+        t.style.opacity = '1';
+        clearTimeout(t._tid);
+        t._tid = setTimeout(function () { t.style.opacity = '0'; }, 5000);
+      }
+      window.__omniShowToast = _showToast;
+
+      function _patchButton(btn) {
+        if (btn._omniPatched) return;
+        btn._omniPatched = true;
+        btn.addEventListener('click', function () {
+          var root = '/World';
+          var section = btn.closest ? btn.closest('.section') : null;
+          if (section) {
+            var inp = section.querySelector('input[type="text"]');
+            if (inp) root = inp.value.trim() || '/World';
+          }
+          var origText = btn.textContent;
+          btn.disabled = true;
+          btn.textContent = 'Running\u2026';
+          window.__omniUsdSend('flownex.deinstance_and_add', { root: root })
+            .then(function (r) {
+              btn.textContent = origText; btn.disabled = false;
+              _showToast('\u2713 ' + (r.message || 'Done.'), false);
+            })
+            .catch(function (err) {
+              btn.textContent = origText; btn.disabled = false;
+              _showToast('\u2717 ' + err.message, true);
+            });
+        });
+      }
+
+      new MutationObserver(function () {
+        var btns = document.querySelectorAll('button');
+        for (var i = 0; i < btns.length; i++) {
+          if (btns[i].textContent.trim() === 'Start Prim Property Override') _patchButton(btns[i]);
+        }
+      }).observe(document.documentElement, { childList: true, subtree: true });
+    }());
+    </script>
+
+    <!-- == Configuration tab: path persistence + server-side file browser =
+         - Persists project path and IO dir to localStorage; restores them
+           whenever the Configuration tab inputs re-appear.
+         - Intercepts "..." browse buttons and sends config.browse_file to
+           the Kit extension for a native OS file dialog (full path).
+         - Patches the bridge WebSocket (ws://127.0.0.1:8001, root path on
+           the aiohttp combined server) to intercept browse_result messages
+           and state messages carrying savedProjectPath / savedIoDir.
+    ===================================================================== -->
+    <script>
+    (function () {
+      var LS_PROJECT = 'omnicool_projectFile';
+      var LS_IODIR   = 'omnicool_ioDirectory';
+
+      var _nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      function _setReactInput(inp, value) {
+        _nativeSetter.call(inp, value);
+        inp.dispatchEvent(new Event('input',  { bubbles: true }));
+        inp.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+
+      var _browseCallbacks = {};
+
+      function _hookBridgeWsMessages() {
+        var OrigWS = window.WebSocket;
+        window.WebSocket = function (url, protocols) {
+          var ws = protocols ? new OrigWS(url, protocols) : new OrigWS(url);
+          /* Bridge WS: root path on the aiohttp server (no /ws suffix). */
+          if (url === 'ws://127.0.0.1:8001') {
+            var origOnMessage = null;
+            Object.defineProperty(ws, 'onmessage', {
+              get: function () { return origOnMessage; },
+              set: function (fn) {
+                origOnMessage = function (evt) {
+                  try {
+                    var msg = JSON.parse(evt.data);
+                    if (msg.type === 'browse_result') {
+                      var cb = _browseCallbacks[msg.payload && msg.payload.requestId];
+                      if (cb) { delete _browseCallbacks[msg.payload.requestId]; cb.resolve(msg.payload.path || ''); }
+                      return;
+                    }
+                    if (msg.type === 'state' && msg.payload) {
+                      if (msg.payload.savedProjectPath) localStorage.setItem(LS_PROJECT, msg.payload.savedProjectPath);
+                      if (msg.payload.savedIoDir)        localStorage.setItem(LS_IODIR,   msg.payload.savedIoDir);
+                      setTimeout(_tryRestorePaths, 200);
+                    }
+                  } catch (e) {}
+                  if (fn) fn.call(ws, evt);
+                };
+                Object.defineProperty(ws, 'onmessage', { value: origOnMessage, writable: true, configurable: true });
+              },
+              configurable: true
+            });
+          }
+          return ws;
+        };
+        window.WebSocket.prototype   = OrigWS.prototype;
+        window.WebSocket.CONNECTING  = OrigWS.CONNECTING;
+        window.WebSocket.OPEN        = OrigWS.OPEN;
+        window.WebSocket.CLOSING     = OrigWS.CLOSING;
+        window.WebSocket.CLOSED      = OrigWS.CLOSED;
+      }
+
+      function _serverBrowse(mode, filters) {
+        return new Promise(function (resolve, reject) {
+          if (!window.__bridgeAPI || !window.__bridgeAPI.send) { reject(new Error('Bridge not connected')); return; }
+          var reqId = Math.random().toString(36).slice(2);
+          _browseCallbacks[reqId] = { resolve: resolve, reject: reject };
+          setTimeout(function () {
+            if (_browseCallbacks[reqId]) { delete _browseCallbacks[reqId]; reject(new Error('Browse dialog timed out or was cancelled')); }
+          }, 120000);
+          window.__bridgeAPI.send({ type: 'config.browse_file', id: reqId, payload: { mode: mode, filters: filters || [], requestId: reqId } });
+        });
+      }
+
+      function _patchBridgeAPI() {
+        if (!window.__bridgeAPI || window.__bridgeAPI._configPatched) return;
+        window.__bridgeAPI._configPatched = true;
+        var orig = window.__bridgeAPI.configure;
+        window.__bridgeAPI.configure = function (projectPath, ioDir, backend) {
+          if (projectPath) localStorage.setItem(LS_PROJECT, projectPath);
+          if (ioDir)        localStorage.setItem(LS_IODIR,   ioDir);
+          return orig.apply(this, arguments);
+        };
+      }
+
+      var _populated = new WeakSet();
+      function _tryRestorePaths() {
+        var savedProject = localStorage.getItem(LS_PROJECT) || '';
+        var savedIoDir   = localStorage.getItem(LS_IODIR)   || '';
+        if (!savedProject && !savedIoDir) return;
+        document.querySelectorAll('input[type="text"]').forEach(function (inp) {
+          if (_populated.has(inp)) return;
+          var ph = inp.getAttribute('placeholder') || '';
+          if (savedProject && (ph.indexOf('.proj') !== -1 || ph.indexOf('.flnx') !== -1)) { _populated.add(inp); if (!inp.value) _setReactInput(inp, savedProject); }
+          else if (savedIoDir && ph.indexOf('IOFiles') !== -1) { _populated.add(inp); if (!inp.value) _setReactInput(inp, savedIoDir); }
+        });
+      }
+
+      var _browseBtnsPatched = new WeakSet();
+      /* React collapsible sections that are not relevant to this workflow.
+         'ANSYS FLUENT' and 'ANSYS SIMAI' live in the Configuration tab of
+         the React app (class="collapsible" wrappers).  'Layout Configuration'
+         and 'Custom Extensions' are Kit-level extension panels that appear
+         when the app runs inside Omniverse Kit. */
+      var _sectionTitlesToHide = [
+        'Layout Configuration', 'Custom Extensions',
+        'ANSYS FLUENT', 'ANSYS SIMAI'
+      ];
+      var _hiddenSectionNodes = new WeakSet();
+
+      function _hideUnwantedSections() {
+        /* Walk text nodes.  For each node whose trimmed text exactly matches a
+           target title, locate the correct container to hide using two
+           strategies:
+             1. React collapsible sections: walk up until we find an ancestor
+                whose class list includes the word "collapsible" — that is the
+                section wrapper regardless of whether the body is currently
+                expanded (rendered) or collapsed (not in DOM).
+             2. Kit-style panels: walk up until the element's stripped text
+                content is substantially longer than the title alone, meaning
+                the body is included in that ancestor.
+           The WeakSet guard prevents double-hiding the same node. */
+        var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+        var node;
+        while ((node = walker.nextNode())) {
+          var txt = node.textContent.trim();
+          if (_sectionTitlesToHide.indexOf(txt) === -1) continue;
+          var target = null;
+
+          /* ── Strategy 1: React collapsible wrapper ───────────────────── */
+          var probe = node.parentElement;
+          while (probe && probe !== document.body) {
+            var classes = (probe.className || '').toString().split(/\s+/);
+            if (classes.indexOf('collapsible') !== -1) { target = probe; break; }
+            probe = probe.parentElement;
+          }
+
+          /* ── Strategy 2: Kit-style panel (content-length heuristic) ──── */
+          if (!target) {
+            var titleLen = txt.replace(/\s+/g, '').length;
+            var el = node.parentElement;
+            while (el && el !== document.body) {
+              if (el.textContent.replace(/\s+/g, '').length > titleLen + 20) { target = el; break; }
+              if (!el.parentElement || el.parentElement === document.body) break;
+              el = el.parentElement;
+            }
+          }
+
+          if (target && !_hiddenSectionNodes.has(target)) {
+            _hiddenSectionNodes.add(target);
+            target.style.setProperty('display', 'none', 'important');
+          }
+        }
+      }
+      function _patchBrowseButtons() {
+        document.querySelectorAll('button').forEach(function (btn) {
+          if (_browseBtnsPatched.has(btn)) return;
+          var label = btn.textContent.trim();
+
+          /* ── Hide Browse "..." and "Browse..." buttons ──────────────── */
+          if (label === '...' || label === 'Browse...') {
+            _browseBtnsPatched.add(btn);
+            btn.style.setProperty('display', 'none', 'important');
+            /* Also widen the sibling text-input so there's no gap. */
+            var row = btn.closest ? btn.closest('div') : btn.parentNode;
+            if (row) {
+              var inp = row.querySelector ? row.querySelector('input[type="text"]') : null;
+              if (inp) inp.style.flex = '1';
+            }
+            return;
+          }
+
+          /* ── Hide redundant buttons (keep one of each duplicate pair) ── *
+           * "Open Flownex" is superseded by "Open Project" (open_project    *
+           * implicitly ensures Flownex is running). "Close Flownex" shuts   *
+           * down the whole app; "Close Project" is the safer action exposed  *
+           * to the user. Hide the more destructive / redundant one.          */
+          if (label === 'Open Flownex' || label === 'Close Flownex') {
+            _browseBtnsPatched.add(btn);
+            btn.style.setProperty('display', 'none', 'important');
+            return;
+          }
+
+          /* Original server-browse path-interception for any remaining
+             "..." buttons that were NOT hidden above (fallback). */
+          var row = btn.closest ? btn.closest('div') : btn.parentNode;
+          if (!row) return;
+          var sibling = row.querySelector ? row.querySelector('input[type="text"]') : null;
+          if (!sibling) return;
+          var ph = sibling.getAttribute('placeholder') || '';
+          var isProject = ph.indexOf('.proj') !== -1 || ph.indexOf('.flnx') !== -1;
+          var isIoDir   = ph.indexOf('IOFiles') !== -1;
+          if (!isProject && !isIoDir) return;
+          _browseBtnsPatched.add(btn);
+          var origLabel = btn.textContent;
+          btn.addEventListener('click', function (e) {
+            e.preventDefault(); e.stopImmediatePropagation();
+            var mode = isIoDir ? 'directory' : 'file';
+            var filters = isProject ? [{ label: 'Flownex / project files', extension: '*.flnx;*.proj;*.fnx;*.zip;*.json' }] : [];
+            btn.disabled = true; btn.textContent = '\u2026';
+            _serverBrowse(mode, filters)
+              .then(function (path) {
+                btn.disabled = false; btn.textContent = origLabel;
+                if (!path) return;
+                _setReactInput(sibling, path);
+                if (isProject) localStorage.setItem(LS_PROJECT, path);
+                else           localStorage.setItem(LS_IODIR,   path);
+                if (window.__omniShowToast) window.__omniShowToast('\u2713 Path set: ' + path, false);
+              })
+              .catch(function (err) {
+                btn.disabled = false; btn.textContent = origLabel;
+                if (window.__omniShowToast) window.__omniShowToast('\u26a0 ' + err.message + ' \u2014 paste the path manually.', true);
+              });
+          }, true);
+        });
+      }
+
+      new MutationObserver(function () {
+        _patchBridgeAPI();
+        _tryRestorePaths();
+        _patchBrowseButtons();
+        _hideUnwantedSections();
+      }).observe(document.documentElement, { childList: true, subtree: true });
+
+      /* Must run before the deferred React bundle connects to the bridge WS */
+      _hookBridgeWsMessages();
+    }());
+    </script>
+
+    <!-- == Flownex Operation Panel ==========================================
+         Schema-driven operation UI.  Opens its own connection to the bridge
+         WebSocket (ws://127.0.0.1:8001), receives schema / state / status /
+         inputs_delta / outputs_delta messages, and renders a full Flownex
+         operation sidebar:
+           • Simulation Controls  (Load Defaults, Run Steady, LD+Run,
+                                   Start/Stop Transient)
+           • Inputs               (sliders / checkboxes generated from schema)
+           • Outputs              (grouped by category, live-updating values)
+         Polls get_state every 4 s while connected but schema-less so it picks
+         up any project that was opened through the React app's Config tab.
+    ====================================================================== -->
+    <script>
+    (function () {
+      'use strict';
+
+      var BRIDGE = 'ws://127.0.0.1:8001';
+      var P      = '__fnx';          /* ID prefix – keeps us isolated from React */
+
+      /* ── Runtime state ──────────────────────────────────────────────────── */
+      var _schema     = { inputs: [], outputs: [] };
+      var _inputDefs  = {};          /* key → schema input def (includes scope) */
+      var _outputDefs = {};          /* key → schema output def                 */
+      var _inputVals  = {};          /* key → current value                     */
+      var _outputVals = {};          /* key → current value                     */
+      var _status     = { state: 'idle', message: '' };
+      var _transient  = false;
+      var _hasSchema  = false;
+
+      /* ── WebSocket ──────────────────────────────────────────────────────── */
+      var _ws = null, _reconn = null, _delay = 2000;
+
+      function _send(type, payload) {
+        if (_ws && _ws.readyState === 1) {
+          try { _ws.send(JSON.stringify({ type: type, payload: payload || {} })); }
+          catch (e) { /* ignore send errors */ }
+        }
+      }
+
+      function _connect() {
+        if (_ws && (_ws.readyState === 0 || _ws.readyState === 1)) return;
+        clearTimeout(_reconn);
+        try { _ws = new WebSocket(BRIDGE); } catch (e) { _retry(); return; }
+
+        _ws.onopen = function () {
+          _delay = 2000;
+          _bar('idle', 'Connected to bridge.');
+          _send('get_state');
+        };
+
+        _ws.onmessage = function (evt) {
+          var m; try { m = JSON.parse(evt.data); } catch (e) { return; }
+          switch (m.type) {
+            case 'schema':        _onSchema(m.payload || {}); break;
+            case 'state':         _onState(m.payload  || {}); break;
+            case 'status':        _onStat(m.payload   || {}); break;
+            case 'inputs_delta':  _onInpD(m.payload   || {}); break;
+            case 'outputs_delta': _onOutD(m.payload   || {}); break;
+          }
+        };
+
+        _ws.onclose = _ws.onerror = function () {
+          _ws = null; _hasSchema = false;
+          _bar('error', 'Bridge disconnected \u2013 reconnecting\u2026');
+          _showOp(false);
+          _retry();
+        };
+      }
+
+      function _retry() {
+        clearTimeout(_reconn);
+        _reconn = setTimeout(_connect, _delay);
+        _delay  = Math.min(_delay * 1.5, 30000);
+      }
+
+      /* Poll for state changes triggered by the React app's Config tab       */
+      setInterval(function () {
+        if (_ws && _ws.readyState === 1 && !_hasSchema) _send('get_state');
+      }, 4000);
+
+      /* ── Message handlers ───────────────────────────────────────────────── */
+      function _onSchema(s) {
+        _schema = s;
+        _inputDefs = {}; _outputDefs = {};
+        (s.inputs  || []).forEach(function (d) { if (d.key) _inputDefs[d.key]  = d; });
+        (s.outputs || []).forEach(function (d) { if (d.key) _outputDefs[d.key] = d; });
+        (s.inputs  || []).forEach(function (d) {
+          if (d.key && !_inputVals.hasOwnProperty(d.key))
+            _inputVals[d.key] = d.defaultValue != null ? d.defaultValue : null;
+        });
+        _hasSchema = !!((s.inputs && s.inputs.length) || (s.outputs && s.outputs.length));
+        _rebuildInps();
+        _rebuildOuts();
+        _showOp(_hasSchema);
+      }
+
+      function _onState(s) {
+        var si = s.inputs || {};
+        Object.keys(si).forEach(function (sc) {
+          Object.keys(si[sc] || {}).forEach(function (k) { _inputVals[k] = si[sc][k]; });
+        });
+        var so = s.outputs || {};
+        Object.keys(so).forEach(function (k) { _outputVals[k] = so[k]; });
+        _transient = !!s.transientRunning;
+        if (s.status) _onStat(s.status);
+        _refreshIV(); _refreshOV(); _updBtns();
+      }
+
+      function _onStat(s) {
+        _status = s;
+        if (s.state !== 'running' && _transient && s.state === 'idle') _transient = false;
+        _bar(s.state || 'idle', s.message || '');
+        _updBtns();
+      }
+
+      function _onInpD(p) {
+        if (!p.key) return;
+        _inputVals[p.key] = p.value;
+        _updIC(p.key, p.value);
+      }
+
+      function _onOutD(p) {
+        if (!p.key) return;
+        _outputVals[p.key] = p.value;
+        _updOD(p.key, p.value);
+      }
+
+      /* ── DOM helpers ────────────────────────────────────────────────────── */
+      function _gi(sfx)  { return document.getElementById(P + '-' + sfx); }
+      function _sid(key) { return (key || '').replace(/[^\w-]/g, '_'); }
+
+      function _fmtV(v, unit) {
+        if (v === null || v === undefined) return unit ? '\u2014\u00a0' + unit : '\u2014';
+        if (typeof v === 'boolean') return v ? 'ON' : 'OFF';
+        if (typeof v === 'number') {
+          var a = Math.abs(v);
+          var s = a === 0 ? '0'
+                : (a >= 10000 || (a < 0.001 && a > 0)) ? v.toExponential(3)
+                : String(parseFloat(v.toPrecision(5)));
+          return unit ? s + '\u00a0' + unit : s;
+        }
+        return String(v) + (unit ? '\u00a0' + unit : '');
+      }
+
+      /* ── Status bar ─────────────────────────────────────────────────────── */
+      function _bar(state, msg) {
+        var dot = _gi('dot'), txt = _gi('msg');
+        if (!dot) return;
+        dot.style.color = state === 'error'   ? '#ef5350'
+                        : state === 'running' ? '#66bb6a' : '#90caf9';
+        if (txt) { txt.style.color = state === 'error' ? '#ef9a9a' : '#bbb'; txt.textContent = msg; }
+      }
+
+      /* ── Operation section visibility ───────────────────────────────────── */
+      function _showOp(yes) {
+        var op = _gi('op'), no = _gi('nosc');
+        if (op) op.style.display = yes ? 'block' : 'none';
+        if (no) no.style.display = yes ? 'none'  : 'block';
+      }
+
+      /* ── Action-button enable/disable ───────────────────────────────────── */
+      function _updBtns() {
+        var run = _status.state === 'running';
+        var _d = function (sfx, dis) { var b = _gi(sfx); if (b) b.disabled = dis; };
+        _d('btn-ld',  run);
+        _d('btn-rs',  run);
+        _d('btn-ldr', run);
+        _d('btn-st',  run || _transient);
+        _d('btn-sp',  !_transient);
+      }
+
+      /* ── Input rendering ────────────────────────────────────────────────── */
+      function _rebuildInps() {
+        var c = _gi('inp-body');
+        if (!c) return;
+        var inps = _schema.inputs || [];
+        if (!inps.length) {
+          c.innerHTML = '<p style="color:#666;font-size:11px;margin:0">No inputs defined in Inputs.csv.</p>';
+          return;
+        }
+        c.innerHTML = '';
+        inps.forEach(function (d) { var r = _mkInpRow(d); if (r) c.appendChild(r); });
+      }
+
+      function _mkInpRow(d) {
+        if (!d.key) return null;
+        var key = d.key, unit = d.unit || '', sid = _sid(key);
+        var val = _inputVals.hasOwnProperty(key) ? _inputVals[key] : d.defaultValue;
+        var et  = (d.editType || 'slider').toLowerCase().trim();
+
+        var row = document.createElement('div');
+        row.style.cssText = 'margin-bottom:11px';
+
+        /* label + live value display */
+        var hdr = document.createElement('div');
+        hdr.style.cssText = 'display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px';
+
+        var lbl = document.createElement('label');
+        lbl.style.cssText = 'font-size:11px;color:#aaa;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+        lbl.title = (d.description || key) + (unit ? ' (' + unit + ')' : '');
+        lbl.textContent = d.description || key;
+
+        var vsp = document.createElement('span');
+        vsp.id = P + '-iv-' + sid;
+        vsp.style.cssText = 'font-size:11px;color:#90caf9;font-family:monospace;min-width:70px;text-align:right;flex-shrink:0';
+        vsp.textContent = _fmtV(val, unit);
+
+        hdr.appendChild(lbl); hdr.appendChild(vsp);
+        row.appendChild(hdr);
+
+        /* control element */
+        if (et === 'checkbox' || typeof val === 'boolean') {
+          var cb = document.createElement('input');
+          cb.type = 'checkbox'; cb.id = P + '-ic-' + sid; cb.checked = !!val;
+          cb.style.cssText = 'width:16px;height:16px;accent-color:#90caf9;cursor:pointer';
+          cb.addEventListener('change', function () {
+            _inputVals[key] = cb.checked;
+            vsp.textContent = cb.checked ? 'ON' : 'OFF';
+            _sendInp(key, cb.checked);
+          });
+          row.appendChild(cb);
+        } else {
+          /* slider (default for numeric) */
+          var minV = d.min  != null ? d.min  : 0;
+          var maxV = d.max  != null ? d.max  : 100;
+          var stpV = d.step != null ? d.step : 1;
+          var numV = typeof val === 'number' ? val : (parseFloat(val) || minV);
+
+          var wrap = document.createElement('div');
+          wrap.style.cssText = 'display:flex;align-items:center;gap:5px';
+
+          var mn = document.createElement('span');
+          mn.style.cssText = 'font-size:9px;color:#555;min-width:24px;text-align:right;flex-shrink:0';
+          mn.textContent = minV;
+
+          var sl = document.createElement('input');
+          sl.type = 'range'; sl.id = P + '-ic-' + sid;
+          sl.min = minV; sl.max = maxV; sl.step = stpV; sl.value = numV;
+          sl.style.cssText = 'flex:1;accent-color:#90caf9;cursor:pointer';
+
+          var mx = document.createElement('span');
+          mx.style.cssText = 'font-size:9px;color:#555;min-width:24px;flex-shrink:0';
+          mx.textContent = maxV;
+
+          sl.addEventListener('input', function () {
+            vsp.textContent = _fmtV(parseFloat(sl.value), unit);
+          });
+          sl.addEventListener('change', function () {
+            var nv = parseFloat(sl.value);
+            _inputVals[key] = nv;
+            _sendInp(key, nv);
+          });
+
+          wrap.appendChild(mn); wrap.appendChild(sl); wrap.appendChild(mx);
+          row.appendChild(wrap);
+        }
+        return row;
+      }
+
+      function _sendInp(key, value) {
+        var d = _inputDefs[key];
+        _send('set_input', { scope: (d && d.scope) || 'dynamic', key: key, value: value });
+      }
+
+      function _updIC(key, value) {
+        var sid = _sid(key);
+        var vsp = document.getElementById(P + '-iv-' + sid);
+        var ctl = document.getElementById(P + '-ic-' + sid);
+        var unit = (_inputDefs[key] || {}).unit || '';
+        if (vsp) vsp.textContent = _fmtV(value, unit);
+        if (ctl && document.activeElement !== ctl) {
+          if (ctl.type === 'checkbox') ctl.checked = !!value;
+          else if (value != null) ctl.value = value;
+        }
+      }
+
+      function _refreshIV() {
+        Object.keys(_inputVals).forEach(function (k) { _updIC(k, _inputVals[k]); });
+      }
+
+      /* ── Output rendering ───────────────────────────────────────────────── */
+      function _rebuildOuts() {
+        var c = _gi('out-body');
+        if (!c) return;
+        var outs = _schema.outputs || [];
+        if (!outs.length) {
+          c.innerHTML = '<p style="color:#666;font-size:11px;margin:0">No outputs defined in Outputs.csv.</p>';
+          return;
+        }
+        var cats = {}, order = [];
+        outs.forEach(function (d) {
+          var cat = d.category || 'General';
+          if (!cats[cat]) { cats[cat] = []; order.push(cat); }
+          cats[cat].push(d);
+        });
+
+        var frag = document.createDocumentFragment();
+        order.forEach(function (cat, ci) {
+          var ch = document.createElement('div');
+          ch.style.cssText = 'font-size:10px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:#90caf9;padding:6px 0 3px;border-bottom:1px solid #2e2e2e;' + (ci ? 'margin-top:10px;' : '') + 'margin-bottom:4px';
+          ch.textContent = cat;
+          frag.appendChild(ch);
+          cats[cat].forEach(function (d) {
+            var key = d.key || '', unit = d.unit || '', sid = _sid(key);
+            var val = _outputVals.hasOwnProperty(key) ? _outputVals[key] : null;
+            var r = document.createElement('div');
+            r.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1e1e1e';
+            var ll = document.createElement('span');
+            ll.style.cssText = 'font-size:11px;color:#999;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:8px';
+            ll.title = key + (unit ? ' [' + unit + ']' : '');
+            ll.textContent = d.description || key;
+            var vv = document.createElement('span');
+            vv.id = P + '-ov-' + sid;
+            vv.style.cssText = 'font-size:12px;color:#e0e0e0;font-family:monospace;text-align:right;min-width:82px;flex-shrink:0';
+            vv.textContent = _fmtV(val, unit);
+            r.appendChild(ll); r.appendChild(vv);
+            frag.appendChild(r);
+          });
+        });
+        c.innerHTML = ''; c.appendChild(frag);
+      }
+
+      function _updOD(key, value) {
+        var sid = _sid(key);
+        var vv  = document.getElementById(P + '-ov-' + sid);
+        if (!vv) return;
+        var unit = (_outputDefs[key] || {}).unit || '';
+        vv.textContent = _fmtV(value, unit);
+        vv.style.color = '#4fc3f7';
+        setTimeout(function () { if (vv) vv.style.color = '#e0e0e0'; }, 500);
+      }
+
+      function _refreshOV() {
+        Object.keys(_outputVals).forEach(function (k) { _updOD(k, _outputVals[k]); });
+      }
+
+      /* ── Panel creation ──────────────────────────────────────────────────── */
+      function _mkBtn(id, txt, bg, title, dis) {
+        var b = document.createElement('button');
+        b.id    = P + '-' + id;
+        b.style.cssText = 'background:' + bg + ';color:#fff;border:none;border-radius:4px;padding:5px 10px;font-size:11px;font-weight:500;cursor:pointer;white-space:nowrap;transition:opacity .15s';
+        b.textContent = txt;
+        b.title = title || '';
+        if (dis) b.disabled = true;
+        b.onmouseover = function () { if (!b.disabled) b.style.opacity = '.8'; };
+        b.onmouseout  = function () { b.style.opacity = '1'; };
+        return b;
+      }
+
+      function _mkSec(label, bodyId, open) {
+        var wrap = document.createElement('div');
+        wrap.style.cssText = 'border-bottom:1px solid #252525';
+        var hdr = document.createElement('div');
+        hdr.style.cssText = 'padding:8px 14px;font-size:10px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:#90caf9;background:#1e1e1e;cursor:pointer;user-select:none;display:flex;align-items:center;justify-content:space-between';
+        var lspan = document.createElement('span'); lspan.textContent = label;
+        var arrow = document.createElement('span'); arrow.textContent = '\u25be'; arrow.style.color = '#555';
+        hdr.appendChild(lspan); hdr.appendChild(arrow);
+        var body = document.createElement('div');
+        body.id = P + '-' + bodyId;
+        body.style.cssText = 'padding:10px 14px';
+        if (!open) body.style.display = 'none';
+        hdr.onclick = function () {
+          var hidden = body.style.display === 'none';
+          body.style.display = hidden ? 'block' : 'none';
+          arrow.textContent = hidden ? '\u25be' : '\u25b8';
+        };
+        wrap.appendChild(hdr); wrap.appendChild(body);
+        return wrap;
+      }
+
+      function _createPanel() {
+        if (document.getElementById(P + '-panel')) return;
+
+        /* ── Scoped styles ──────────────────────────────────────────────── */
+        var style = document.createElement('style');
+        style.id = P + '-css';
+        style.textContent = [
+          '#' + P + '-panel{all:initial;position:fixed;top:0;right:0;width:370px;height:100vh;background:#1a1a1a;border-left:1px solid #2e2e2e;display:flex;flex-direction:column;z-index:9500;font:13px/1.4 "Segoe UI",system-ui,sans-serif;color:#e0e0e0;box-shadow:-4px 0 24px rgba(0,0,0,.55)}',
+          '#' + P + '-panel *{box-sizing:border-box}',
+          '#' + P + '-inner{flex:1;overflow-y:auto;overflow-x:hidden}',
+          '#' + P + '-panel input[type=range]{width:100%;accent-color:#90caf9;cursor:pointer}',
+          '#' + P + '-panel input[type=number]{width:100%;background:#252525;border:1px solid #3a3a3a;color:#e0e0e0;padding:4px 8px;border-radius:4px;font-size:12px}',
+          '#' + P + '-panel input[type=number]:focus{outline:1px solid #90caf9;outline-offset:-1px}',
+          '#' + P + '-panel button:disabled{opacity:.35;cursor:not-allowed}',
+          /* nudge body so React app content is not hidden beneath the panel */
+          'body{padding-right:370px!important;overflow-x:hidden}',
+        ].join('\n');
+        document.head.appendChild(style);
+
+        /* ── Panel container ────────────────────────────────────────────── */
+        var panel = document.createElement('div');
+        panel.id = P + '-panel';
+
+        /* header */
+        var panelHdr = document.createElement('div');
+        panelHdr.style.cssText = 'background:#111;padding:9px 14px;border-bottom:1px solid #2e2e2e;display:flex;align-items:center;gap:8px;flex-shrink:0';
+        panelHdr.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#90caf9" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="12" x2="15" y2="14"/></svg><span style="font-size:12px;font-weight:600;color:#ddd;letter-spacing:.2px">Flownex Operation</span>';
+        var colBtn = document.createElement('button');
+        colBtn.id = P + '-col-btn';
+        colBtn.innerHTML = '&#xBB;';
+        colBtn.title = 'Minimise panel';
+        colBtn.style.cssText = 'margin-left:auto;background:none;border:none;color:#666;cursor:pointer;font-size:16px;padding:1px 5px;border-radius:3px;line-height:1;transition:color .15s';
+        colBtn.onmouseover = function () { colBtn.style.color = '#aaa'; };
+        colBtn.onmouseout  = function () { colBtn.style.color = _collapsed ? '#aaa' : '#666'; };
+        panelHdr.appendChild(colBtn);
+        panel.appendChild(panelHdr);
+
+        /* status bar */
+        var statusBar = document.createElement('div');
+        statusBar.id = P + '-status-bar';
+        statusBar.style.cssText = 'padding:5px 14px;background:#161616;font-size:11px;border-bottom:1px solid #252525;flex-shrink:0;display:flex;align-items:center;gap:5px';
+        var dot = document.createElement('span'); dot.id = P + '-dot'; dot.textContent = '\u29bf'; dot.style.color = '#555';
+        var msg = document.createElement('span'); msg.id = P + '-msg'; msg.style.color = '#777'; msg.textContent = 'Initialising\u2026';
+        statusBar.appendChild(dot); statusBar.appendChild(msg);
+        panel.appendChild(statusBar);
+
+        /* scrollable inner area */
+        var inner = document.createElement('div');
+        inner.id = P + '-inner';
+        panel.appendChild(inner);
+
+        /* no-schema placeholder */
+        var noSc = document.createElement('div');
+        noSc.id = P + '-nosc';
+        noSc.style.cssText = 'padding:18px 16px;color:#777;font-size:12px;line-height:1.7';
+        noSc.innerHTML = '<p style="margin:0 0 8px;color:#aaa;font-weight:600">Flownex Not Connected</p>To use the operation panel:<br>1.\u2002Enter <b style="color:#90caf9">Project Path</b> and <b style="color:#90caf9">IO Directory</b> in the Configuration tab.<br>2.\u2002Click <b style="color:#4fc3f7">Connect</b> or <b style="color:#4fc3f7">Open Project</b>.<br>3.\u2002This panel will populate with operation controls.';
+        inner.appendChild(noSc);
+
+        /* operation section */
+        var opSec = document.createElement('div');
+        opSec.id = P + '-op';
+        opSec.style.display = 'none';
+        inner.appendChild(opSec);
+
+        /* ── Simulation Controls ────────────────────────────────────────── */
+        var ctrlSec = _mkSec('Simulation Controls', 'ctrl-body', true);
+        var ctrlBody = ctrlSec.querySelector('#' + P + '-ctrl-body');
+        var btnRow = document.createElement('div');
+        btnRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px';
+        btnRow.appendChild(_mkBtn('btn-ld',  'Load Defaults',    '#37474f', 'Reset inputs to default values from IO definitions'));
+        btnRow.appendChild(_mkBtn('btn-rs',  'Run Steady',       '#1b5e20', 'Run steady-state simulation'));
+        btnRow.appendChild(_mkBtn('btn-ldr', 'LD\u00a0+ Run',    '#1565c0', 'Load defaults then run steady-state simulation'));
+        btnRow.appendChild(_mkBtn('btn-st',  '\u25b6 Start Transient', '#4a148c', 'Start transient simulation'));
+        btnRow.appendChild(_mkBtn('btn-sp',  '\u25a0 Stop Transient',  '#b71c1c', 'Stop transient simulation', true));
+        ctrlBody.appendChild(btnRow);
+        opSec.appendChild(ctrlSec);
+
+        /* ── Inputs ─────────────────────────────────────────────────────── */
+        opSec.appendChild(_mkSec('Inputs', 'inp-body', true));
+
+        /* ── Outputs ─────────────────────────────────────────────────────── */
+        opSec.appendChild(_mkSec('Outputs', 'out-body', true));
+
+        document.body.appendChild(panel);
+
+        /* ── Collapse/expand toggle ─────────────────────────────────────── */
+        var _collapsed = false;
+        colBtn.onclick = function () {
+          _collapsed = !_collapsed;
+          inner.style.display       = _collapsed ? 'none' : '';
+          statusBar.style.display   = _collapsed ? 'none' : '';
+          panel.style.width         = _collapsed ? '32px' : '370px';
+          colBtn.innerHTML          = _collapsed ? '&#xAB;' : '&#xBB;';
+          colBtn.title              = _collapsed ? 'Expand panel' : 'Minimise panel';
+          colBtn.style.color        = _collapsed ? '#90caf9' : '#666';
+          /* update body padding */
+          var s = document.getElementById(P + '-css');
+          if (s) {
+            s.textContent = s.textContent.replace(/padding-right:[^!]+!important/, 'padding-right:' + (_collapsed ? '32' : '370') + 'px!important');
+          }
+        };
+
+        /* ── Wire action buttons ─────────────────────────────────────────── */
+        _gi('btn-ld').onclick  = function () { _send('load_defaults', {}); };
+        _gi('btn-rs').onclick  = function () { _send('run', { mode: 'steady' }); };
+        _gi('btn-ldr').onclick = function () { _send('load_defaults_and_run_steady', {}); };
+        _gi('btn-st').onclick  = function () {
+          _transient = true; _updBtns();
+          _send('start_transient', {});
+        };
+        _gi('btn-sp').onclick  = function () {
+          _transient = false; _updBtns();
+          _send('stop_transient', {});
+        };
+      }
+
+      /* ── Bootstrap ───────────────────────────────────────────────────────── */
+      function _init() {
+        _createPanel();
+        _connect();
+      }
+
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _init);
+      else setTimeout(_init, 0);
+    }());
+    </script>
+  </body>
+</html>
